@@ -54,6 +54,9 @@ def main():
     if torch.cuda.device_count() > 1 and device.type == 'cuda':
         print(f"🔥 Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
         model = nn.DataParallel(model)
+    if os.name != 'nt' and torch.cuda.is_available():
+        print("🚀 Compiling model with torch.compile...")
+        model = torch.compile(model)
     else:
         print("Chạy trên Single GPU.")
 
@@ -67,8 +70,24 @@ def main():
     # Loop
     best_acc = 0.0
     ensure_dir('./checkpoints')
-    
+    def set_freeze_status(model, freeze_backbone=True):
+
+        real_model = model.module if hasattr(model, 'module') else model
+        
+        for param in real_model.backbone.parameters():
+            param.requires_grad = not freeze_backbone
+        
+        if freeze_backbone:
+            print("Backbone FROZEN (Chỉ train SMIF & Head)")
+        else:
+            print("Backbone UN-FROZEN (Train toàn bộ)")
     for epoch in range(t_cfg.epochs):
+        
+        if epoch < 3:
+            set_freeze_status(model, freeze_backbone=True)
+        else:
+            set_freeze_status(model, freeze_backbone=False)
+            
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
         
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, device)
