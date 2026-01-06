@@ -22,14 +22,14 @@ class TrainingConfig:
     data_root: str = './hmdb51_data'
     weights_dir: str = './weights'
     pretrained_name: str = 'vit_base_patch16_224'
-    batch_size: int = 4  # Trên Mac có thể cần giảm batch size nếu RAM ít
+    batch_size: int = 32  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = 16
     frame_stride: int = 2
     lr: float = 1e-4
     epochs: int = 10
     val_ratio: float = 0.1
     seed: int = 42
-    num_workers: int = 2  # Mac thường tối ưu tốt hơn với num_workers thấp hơn (0 hoặc 2)
+    num_workers: int = 4  # Mac thường tối ưu tốt hơn với num_workers thấp hơn (0 hoặc 2)
     
     # LOGIC CHỌN DEVICE: Ưu tiên MPS cho Mac -> CUDA -> CPU
     @property
