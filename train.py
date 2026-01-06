@@ -1,5 +1,5 @@
-# train.py
 import torch
+import torch.nn as nn 
 from torch.utils.data import DataLoader
 from src.config import ModelConfig, TrainingConfig
 from src.dataset import HMDB51Dataset, collate_fn
@@ -13,16 +13,10 @@ def main():
     m_cfg = ModelConfig()
     set_seed(t_cfg.seed)
     
-    # Lấy device từ property đã sửa
     device = torch.device(t_cfg.device)
     print(f"Using device: {device}")
-    
-    if device.type == 'mps':
-        print("⚡ Running on Apple Silicon GPU (Metal Performance Shaders)")
 
     # Dataset & Dataloader
-    # Lưu ý: Trên Mac, num_workers quá cao có thể gây lỗi 'Too many open files'
-    # Nếu gặp lỗi, hãy set num_workers=0 trong TrainingConfig
     print("Initializing datasets...")
     train_ds = HMDB51Dataset(
         root=t_cfg.data_root, split='train', 
@@ -43,16 +37,30 @@ def main():
         val_ds, batch_size=t_cfg.batch_size, shuffle=False,
         num_workers=t_cfg.num_workers, pin_memory=True, collate_fn=collate_fn
     )
+    
+    print(f"Train size: {len(train_ds)} | Val size: {len(val_ds)}")
 
-    # Model Setup
-    model = LSViTForAction(config=m_cfg).to(device)
+    # Model Setup 
+    print("Creating model...")
+    model = LSViTForAction(config=m_cfg)
+    
+    # BƯỚC 1: Load weights VÀO RAM trước khi đẩy vào GPU
     load_vit_checkpoint(model.backbone, t_cfg.pretrained_name, t_cfg.weights_dir)
+
+    # BƯỚC 2: Đẩy model vào GPU chính
+    model = model.to(device)
+    
+    # BƯỚC 3: Kích hoạt DataParallel nếu có > 1 GPU
+    if torch.cuda.device_count() > 1 and device.type == 'cuda':
+        print(f"🔥 Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
+        model = nn.DataParallel(model)
+    else:
+        print("Chạy trên Single GPU.")
 
     # Training Setup
     optimizer = torch.optim.AdamW(model.parameters(), lr=t_cfg.lr)
     
-    # Scaler chỉ cần thiết nếu dùng AMP. 
-    # PyTorch tự handle device trong GradScaler (nhưng tốt nhất enable=True/False)
+    # Scaler cho Mixed Precision
     use_amp = (device.type == 'cuda') or (device.type == 'mps')
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp) if use_amp else None
     
@@ -71,7 +79,9 @@ def main():
         
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), "./checkpoints/best_model.pth")
+            model_to_save = model.module if hasattr(model, 'module') else model
+            torch.save(model_to_save.state_dict(), "./checkpoints/best_model.pth")
+            
             print(f"New best model saved! ({best_acc:.4f})")
 
 if __name__ == "__main__":
