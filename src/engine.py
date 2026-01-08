@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from torch.amp import autocast
 
 def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1):
     model.train()

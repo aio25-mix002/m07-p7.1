@@ -2,7 +2,7 @@ import torch
 import random
 import re
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import Tuple
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torchvision.transforms.functional as TF
@@ -61,7 +61,8 @@ class HMDB51Dataset(Dataset):
             cls_dir = self.root / cls
             for video_dir in sorted([d for d in cls_dir.iterdir() if d.is_dir()]):
                 frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {".jpg", ".png"}])
-                if not frame_paths: continue
+                if not frame_paths: 
+                    continue
                 
                 # Extract base name to handle potential splits/clips
                 base_name = self._base_video_name(video_dir.name)
@@ -128,3 +129,45 @@ def collate_fn(batch):
     videos = torch.stack([item[0] for item in batch])
     labels = torch.tensor([item[1] for item in batch], dtype=torch.long)
     return videos, labels
+
+class TestDataset(Dataset):
+    def __init__(self, root, num_frames=16, frame_stride=2, image_size=224):
+        self.root = Path(root)
+        self.num_frames = num_frames
+        self.frame_stride = frame_stride
+        self.transform = VideoTransform(image_size, is_train=False)
+        self.to_tensor = transforms.ToTensor()
+        self.video_dirs = sorted([d for d in self.root.iterdir() if d.is_dir()], key=lambda x: int(x.name))
+        self.video_ids = [int(d.name) for d in self.video_dirs]
+    
+    def __len__(self):
+        return len(self.video_dirs)
+    
+    def _select_indices(self, total):
+        if total <= 0:
+            raise ValueError("No frames")
+        if total == 1:
+            return torch.zeros(self.num_frames, dtype=torch.long)
+        steps = max(self.num_frames * self.frame_stride, self.num_frames)
+        grid = torch.linspace(0, total - 1, steps=steps)
+        idxs = grid[::self.frame_stride].long()
+        if idxs.numel() < self.num_frames:
+            pad = idxs.new_full((self.num_frames - idxs.numel(),), idxs[-1].item())
+            idxs = torch.cat([idxs, pad], dim=0)
+        return idxs[:self.num_frames]
+    
+    def __getitem__(self, idx):
+        video_dir = self.video_dirs[idx]
+        video_id = self.video_ids[idx]
+        frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {'.jpg', '.jpeg', '.png'}])
+        total = len(frame_paths)
+        idxs = self._select_indices(total)
+        frames = []
+        for i in idxs:
+            path = frame_paths[int(i.item())]
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                frames.append(self.to_tensor(img))
+        video = torch.stack(frames)
+        video = self.transform(video)
+        return video, video_id

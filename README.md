@@ -30,38 +30,77 @@ lsvit-hmdb51/
 - Python 3.8 or higher
 - PyTorch 2.0 or higher
 - Internet connection (for downloading the dataset and pretrained weights)
+- UV package manager (recommended) or pip
 
 ## Installation
 
+### Using UV (Recommended)
+
+UV is a fast Python package installer and resolver. Install UV first if you haven't:
+
+```bash
+# On macOS and Linux:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# On Windows:
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Then install the project:
+
 1. Clone the repository:
 
-   ```
+   ```bash
    git clone https://github.com/aio25-mix002/m07-p7.1.git
    cd m07-p7.1
    ```
-2. Create a virtual environment (Recommended):
 
-   # For macOS/Linux
+2. Create a virtual environment and install dependencies:
 
-
+   ```bash
+   uv venv
+   uv pip install -e .
    ```
+
+3. Activate the virtual environment:
+
+   ```bash
+   # For macOS/Linux:
+   source .venv/bin/activate
+
+   # For Windows:
+   .venv\Scripts\activate
+   ```
+
+### Using pip (Alternative)
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/aio25-mix002/m07-p7.1.git
+   cd m07-p7.1
+   ```
+
+2. Create a virtual environment:
+
+   ```bash
+   # For macOS/Linux
    python -m venv venv
    source venv/bin/activate
-   ```
 
    # For Windows
-
-   ```
    python -m venv venv
    .\venv\Scripts\activate
    ```
+
 3. Install dependencies:
 
-   ```
+   ```bash
    pip install -r requirements.txt
    ```
 
 ## Data Preparation
+### Download from Google Drive
 
 The project includes an automated script to download the HMDB51 dataset from Google Drive and prepare it for training.
 
@@ -77,6 +116,13 @@ This script will:
 2. Extract it into the 'hmdb51_data/' directory.
 3. Organize the file structure if necessary.
 4. Clean up temporary zip files.
+
+### Download directly from Kaggle competition
+
+```
+uv run --env-file .env.local python download_data_from_kaggle.py
+```
+
 
 ## Usage
 
