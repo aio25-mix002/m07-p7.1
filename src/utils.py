@@ -63,6 +63,7 @@ def save_checkpoint(
     training_params: dict,
     expr_name: str,
     val_acc: float,
+    train_classes: list[str],
 ) -> Path:
     """Save checkpoint in a timestamped folder with metrics.json
 
@@ -81,7 +82,14 @@ def save_checkpoint(
     # Save model checkpoint
     model_path = run_dir / "best_model.pth"
     model_to_save = model.module if hasattr(model, "module") else model
-    torch.save({"model": model_to_save.state_dict(), "val_acc": val_acc}, model_path)
+    torch.save(
+        {
+            "model": model_to_save.state_dict(),
+            "val_acc": val_acc,
+            "train_classes": train_classes,
+        },
+        model_path,
+    )
 
     # Combine metrics and training params
     full_metrics = {

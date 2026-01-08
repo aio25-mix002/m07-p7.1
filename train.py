@@ -89,7 +89,7 @@ def main():
 
     # Loop
     best_acc = 0.0
-    
+
     # Create checkpoint directory with optional experiment name suffix
     checkpoint_dir = t_cfg.checkpoint_dir
     ensure_dir(checkpoint_dir)
@@ -125,30 +125,13 @@ def main():
 
         if val_acc > best_acc:
             best_acc = val_acc
-            
+
             # Prepare training parameters
             training_params = {
-                "lr": t_cfg.lr,
-                "batch_size": t_cfg.batch_size,
-                "num_frames": t_cfg.num_frames,
-                "frame_stride": t_cfg.frame_stride,
-                "epochs": t_cfg.epochs,
-                "seed": t_cfg.seed,
-                "pretrained_name": t_cfg.pretrained_name,
-                "val_ratio": t_cfg.val_ratio,
-                "image_size": m_cfg.image_size,
-                "patch_size": m_cfg.patch_size,
-                "embed_dim": m_cfg.embed_dim,
-                "depth": m_cfg.depth,
-                "num_heads": m_cfg.num_heads,
-                "mlp_ratio": m_cfg.mlp_ratio,
-                "drop_rate": m_cfg.drop_rate,
-                "attn_drop_rate": m_cfg.attn_drop_rate,
-                "drop_path_rate": m_cfg.drop_path_rate,
-                "smif_window": m_cfg.smif_window,
-                "num_classes": m_cfg.num_classes,
+                "train": vars(t_cfg),
+                "model": vars(m_cfg),
             }
-            
+
             # Prepare metrics
             metrics = {
                 "epoch": epoch + 1,
@@ -158,9 +141,17 @@ def main():
                 "val_acc": val_acc,
                 "best_acc": best_acc,
             }
-            
+
             # Save checkpoint with metrics
-            save_checkpoint(model, checkpoint_dir, metrics, training_params, t_cfg.expr_name, val_acc=val_acc)
+            save_checkpoint(
+                model,
+                checkpoint_dir,
+                metrics,
+                training_params,
+                t_cfg.expr_name,
+                val_acc=val_acc,
+                train_classes=train_ds.classes,
+            )
             logger.info(f"New best model saved! ({best_acc:.4f})")
 
 
