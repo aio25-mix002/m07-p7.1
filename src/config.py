@@ -22,7 +22,7 @@ def _get_default_data_root() -> str:
     """Get default data root based on environment."""
     if os.path.exists('/kaggle'):
         # In Kaggle environment, use /kaggle/working/data
-        return '/kaggle/working/data/train'
+        return '/kaggle/working/data/data_train'
     else:
         # Local environment
         return './hmdb51_data'
