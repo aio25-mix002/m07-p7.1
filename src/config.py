@@ -58,6 +58,7 @@ class TrainingConfig:
         self.seed: int = int(os.getenv('APPCONFIG__SEED', 42))
         self.num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 4))
         self.checkpoint_dir: str = os.getenv('APPCONFIG__CHECKPOINT_DIR', './checkpoints')
+        #self.log_dir: str = os.getenv('APPCONFIG__LOG_DIR', './logs')
     
     # LOGIC CHỌN DEVICE: Ưu tiên MPS cho Mac -> CUDA -> CPU
     @property
@@ -68,6 +69,25 @@ class TrainingConfig:
         elif torch.cuda.is_available():
             return 'cuda'
         return 'cpu'
+    
+    def reload(self):
+        """Reload configuration from environment variables. Call explicitly if env vars change."""
+        self._load()
+
+
+class TestConfig:
+    """Singleton config for testing parameters. Loads once at first access."""
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._load()
+        return cls._instance
+    
+    def _load(self):
+        """Load configuration from environment variables."""
+        self.data_root: str = os.getenv('APPCONFIG__TEST_DATA_ROOT', './kaggle/competitions/action-video/data/test')
     
     def reload(self):
         """Reload configuration from environment variables. Call explicitly if env vars change."""
