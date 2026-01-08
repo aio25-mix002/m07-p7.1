@@ -215,3 +215,5 @@ weights/
 checkpoints/
 .DS_Store
 .vscode/
+
+kaggle.json

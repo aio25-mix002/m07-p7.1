@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import os
 import torch
 
 @dataclass
@@ -17,10 +18,26 @@ class ModelConfig:
     num_classes: int = 51
     smif_window: int = 5
 
+def _get_default_data_root() -> str:
+    """Get default data root based on environment."""
+    if os.path.exists('/kaggle'):
+        # In Kaggle environment, use /kaggle/working/data
+        return '/kaggle/working/data/train'
+    else:
+        # Local environment
+        return './hmdb51_data'
+
+def _get_default_weights_dir() -> str:
+    """Get default weights directory based on environment."""
+    if os.path.exists('/kaggle'):
+        return '/kaggle/working/weights'
+    else:
+        return './weights'
+
 @dataclass
 class TrainingConfig:
-    data_root: str = './hmdb51_data'
-    weights_dir: str = './weights'
+    data_root: str = field(default_factory=_get_default_data_root)
+    weights_dir: str = field(default_factory=_get_default_weights_dir)
     pretrained_name: str = 'vit_base_patch16_224'
     batch_size: int = 4  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = 16
@@ -30,7 +47,7 @@ class TrainingConfig:
     val_ratio: float = 0.1
     seed: int = 42
     num_workers: int = 2  # Mac thường tối ưu tốt hơn với num_workers thấp hơn (0 hoặc 2)
-    
+
     # LOGIC CHỌN DEVICE: Ưu tiên MPS cho Mac -> CUDA -> CPU
     @property
     def device(self) -> str:
