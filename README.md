@@ -126,7 +126,7 @@ All configuration parameters can be overridden using environment variables. This
 | `APPCONFIG__DROP_RATE` | float | Dropout rate |
 | `APPCONFIG__ATTN_DROP_RATE` | float | Attention dropout rate |
 | `APPCONFIG__DROP_PATH_RATE` | float | Drop path rate |
-| `APPCONFIG__QKV_BIAS` | bool | Use bias in QKV projections |
+| `APPCONFIG__QKV_BIAS` | bool | Use bias in QKV projections (`true`, `1`, `yes` for true; `false`, `0`, `no` for false; values are case-insensitive) |
 | `APPCONFIG__NUM_CLASSES` | int | Number of action classes (HMDB51) |
 | `APPCONFIG__SMIF_WINDOW` | int | SMIF temporal window size |
 
@@ -164,7 +164,7 @@ export APPCONFIG__LR=0.0001
 python train.py
 ```
 
-**Inline (All platforms):**
+**Inline (macOS/Linux only):**
 ```bash
 APPCONFIG__BATCH_SIZE=4 APPCONFIG__EPOCHS=20 python train.py
 ```
