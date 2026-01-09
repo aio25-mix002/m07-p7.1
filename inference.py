@@ -1,4 +1,4 @@
-# Make inference on Kaggle test set and create the submission file, submit directly to Kaggle if needed
+# Make inference on Kaggle test set and create the submission file
 import argparse
 from pathlib import Path
 import torch
@@ -7,15 +7,27 @@ from src.dataset import TestDataset, test_collate_fn
 from src.model import LSViTForAction
 from src.config import ModelConfig
 
-def kaggle_submit(predictions: list[str], submission_file: Path, submit: bool = False):
+def save_submission(predictions: list[str], submission_file: Path) -> Path:
+    """Save predictions to CSV file and return the file path."""
     import pandas as pd
-    import kaggle
+    import os
 
-    df = pd.DataFrame({'Id': range(len(predictions)), 'Category': predictions})
-    df.to_csv(submission_file, index=False)
+    df = pd.DataFrame({'id': range(len(predictions)), 'class': predictions})
 
-    if submit:
-        kaggle.api.competition_submit(submission_file, "LSViT", "LSViT submission")
+    # Check if running on Kaggle platform
+    is_kaggle_env = os.path.exists('/kaggle/working')
+
+    if is_kaggle_env:
+        # When running on Kaggle, save to /kaggle/working/ for auto-submission
+        output_path = Path('/kaggle/working/submission.csv')
+        df.to_csv(output_path, index=False)
+        print(f"\n✓ Submission file created at: {output_path}")
+        return output_path
+    else:
+        # When running locally, save to specified path
+        df.to_csv(submission_file, index=False)
+        print(f"\n✓ Submission file created at: {submission_file}")
+        return submission_file
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Inference on test set')
@@ -41,8 +53,6 @@ def parse_args():
                         help='Random seed for reproducibility')
     parser.add_argument('--submission_file', type=str, default='./submission.csv',
                         help='Path to save submission file')
-    parser.add_argument('--submit', action='store_true',
-                        help='Submit to Kaggle after inference')
     return parser.parse_args()
 
 def main():
@@ -134,8 +144,11 @@ def main():
 
     # Create submission
     submission_path = Path(args.submission_file)
-    kaggle_submit(predicted_classes, submission_path, submit=args.submit)
+    saved_path = save_submission(predicted_classes, submission_path)
+
+    return saved_path
 
 
 if __name__ == "__main__":
-    main()
+    submission_path = main()
+    print(f"\nSubmission saved to: {submission_path}")
