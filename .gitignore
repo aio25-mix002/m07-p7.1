@@ -218,3 +218,4 @@ checkpoints/
 
 kaggle.json
 sample
+test_3d_patch_embedding.py

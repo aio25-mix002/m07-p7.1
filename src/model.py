@@ -19,6 +19,7 @@ class DropPath(nn.Module):
         return x.div(keep_prob) * random_tensor
 
 class PatchEmbed(nn.Module):
+    """2D Image to Patch Embedding"""
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.num_patches = (config.image_size // config.patch_size) ** 2
@@ -26,8 +27,41 @@ class PatchEmbed(nn.Module):
                               kernel_size=config.patch_size, stride=config.patch_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
+        x = self.proj(x)  # (B, embed_dim, H/P, W/P)
+        x = x.flatten(2).transpose(1, 2)  # (B, num_patches, embed_dim)
+        return x
+
+class PatchEmbed3D(nn.Module):
+    """3D Video to Patch Embedding with spatiotemporal patches"""
+    def __init__(self, config: ModelConfig, num_frames: int):
+        super().__init__()
+        self.img_size = config.image_size
+        self.patch_size = config.patch_size
+        self.num_frames = num_frames
+        self.tubelet_size = config.tubelet_size
+
+        # Calculate number of spatiotemporal patches
+        self.num_spatial_patches = (config.image_size // config.patch_size) ** 2
+        self.num_temporal_patches = num_frames // config.tubelet_size
+        self.num_patches = self.num_temporal_patches * self.num_spatial_patches
+
+        # 3D convolution to project spatiotemporal patches
+        self.proj = nn.Conv3d(
+            config.in_chans,
+            config.embed_dim,
+            kernel_size=(config.tubelet_size, config.patch_size, config.patch_size),
+            stride=(config.tubelet_size, config.patch_size, config.patch_size)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T, H, W)
+        B, C, T, H, W = x.shape
+        x = self.proj(x)  # (B, embed_dim, T/tubelet, H/P, W/P)
+
+        # Flatten spatial and temporal dimensions
+        # Output: (B, embed_dim, num_temporal_patches, num_spatial_patches)
+        x = x.flatten(2)  # (B, embed_dim, num_patches)
+        x = x.transpose(1, 2)  # (B, num_patches, embed_dim)
         return x
 
 class Mlp(nn.Module):
@@ -166,16 +200,25 @@ class LSViTBlock(nn.Module):
         return x
 
 class LSViTBackbone(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, num_frames: int = None):
         super().__init__()
         self.config = config
-        self.patch_embed = PatchEmbed(config)
+        self.use_3d_patch_embed = config.use_3d_patch_embed
+
+        # Choose patch embedding based on configuration
+        if self.use_3d_patch_embed:
+            if num_frames is None:
+                raise ValueError("num_frames must be specified when using 3D patch embedding")
+            self.patch_embed = PatchEmbed3D(config, num_frames)
+        else:
+            self.patch_embed = PatchEmbed(config)
+
         num_patches = self.patch_embed.num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, config.embed_dim))
         self.pos_drop = nn.Dropout(config.drop_rate)
         dpr = torch.linspace(0, config.drop_path_rate, steps=config.depth).tolist()
-        
+
         self.blocks = nn.ModuleList([
             LSViTBlock(
                 dim=config.embed_dim, num_heads=config.num_heads, mlp_ratio=config.mlp_ratio,
@@ -205,30 +248,58 @@ class LSViTBackbone(nn.Module):
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
         B, T, C, H, W = video.shape
-        x = video.reshape(B * T, C, H, W)
-        x = self.patch_embed(x)
-        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        pos_embed = self._interpolate_pos_encoding(x)
-        x = x + pos_embed
-        x = self.pos_drop(x)
-        for block in self.blocks:
-            x = block(x, B, T)
-        x = self.norm(x)
-        x = x.view(B, T, x.shape[1], x.shape[2])
-        return x
+
+        if self.use_3d_patch_embed:
+            # For 3D patch embedding: input (B, C, T, H, W)
+            x = video.permute(0, 2, 1, 3, 4)  # (B, T, C, H, W) -> (B, C, T, H, W)
+            x = self.patch_embed(x)  # (B, num_patches, embed_dim)
+
+            # Add cls token
+            cls_tokens = self.cls_token.expand(B, -1, -1)
+            x = torch.cat((cls_tokens, x), dim=1)
+
+            # Add position embedding
+            pos_embed = self._interpolate_pos_encoding(x)
+            x = x + pos_embed
+            x = self.pos_drop(x)
+
+            # Process with transformer blocks
+            # For 3D patches, we treat all patches as a sequence
+            # Create dummy T=1 for block processing since patches already include temporal info
+            effective_T = 1
+            for block in self.blocks:
+                x = block(x, B, effective_T)
+
+            x = self.norm(x)
+            # Return with batch dimension only: (B, num_patches+1, embed_dim)
+            return x.unsqueeze(1)  # (B, 1, num_patches+1, embed_dim)
+        else:
+            # Original 2D patch embedding per frame
+            x = video.reshape(B * T, C, H, W)
+            x = self.patch_embed(x)
+            cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_tokens, x), dim=1)
+            pos_embed = self._interpolate_pos_encoding(x)
+            x = x + pos_embed
+            x = self.pos_drop(x)
+            for block in self.blocks:
+                x = block(x, B, T)
+            x = self.norm(x)
+            x = x.view(B, T, x.shape[1], x.shape[2])
+            return x
 
 class LSViTForAction(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, num_frames: int = None):
         super().__init__()
         self.smif = SMIFModule(config.in_chans, window_size=config.smif_window)
-        self.backbone = LSViTBackbone(config)
+        self.backbone = LSViTBackbone(config, num_frames=num_frames)
         self.head = nn.Linear(config.embed_dim, config.num_classes)
+        self.use_3d_patch_embed = config.use_3d_patch_embed
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
         x = self.smif(video)
         feats = self.backbone(x)
-        cls_tokens = feats[:, :, 0]
-        pooled = cls_tokens.mean(dim=1)
+        cls_tokens = feats[:, :, 0]  # Extract CLS tokens
+        pooled = cls_tokens.mean(dim=1)  # Pool across temporal dimension
         logits = self.head(pooled)
         return logits

@@ -17,6 +17,9 @@ class ModelConfig:
     qkv_bias: bool = os.getenv('APPCONFIG__QKV_BIAS', 'True').lower() in ('true', '1', 'yes')
     num_classes: int = int(os.getenv('APPCONFIG__NUM_CLASSES', 51))
     smif_window: int = int(os.getenv('APPCONFIG__SMIF_WINDOW', 5))
+    # 3D Patch Embedding parameters
+    use_3d_patch_embed: bool = os.getenv('APPCONFIG__USE_3D_PATCH_EMBED', 'False').lower() in ('true', '1', 'yes')
+    tubelet_size: int = int(os.getenv('APPCONFIG__TUBELET_SIZE', 2))  # Temporal patch size
 
 def _get_default_data_root() -> str:
     """Get default data root based on environment."""
