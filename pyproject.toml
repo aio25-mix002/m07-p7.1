@@ -1,0 +1,43 @@
+[project]
+name = "lsvit-hmdb51"
+version = "0.1.0"
+description = "LS-ViT Action Recognition on HMDB51"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "timm>=0.9.0",
+    "numpy",
+    "matplotlib",
+    "tqdm",
+    "Pillow",
+    "gdown",
+    "ipykernel>=6.29.5",
+    "kagglehub>=0.2.9",
+    "python-dotenv>=1.0.1",
+    "loguru>=0.7.0",
+    "ipywidgets>=8.1.8",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+  { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu124", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.4",
+]
