@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 import os
 import torch
-import os
 
 @dataclass
 class ModelConfig:
@@ -38,7 +37,7 @@ def _get_default_weights_dir() -> str:
 @dataclass
 class TrainingConfig:
     data_root: str = field(default_factory=lambda: os.getenv('APPCONFIG__DATA_ROOT') or _get_default_data_root())
-    weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR' or _get_default_weights_dir())
+    weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR') or _get_default_weights_dir())
     pretrained_name: str = os.getenv('APPCONFIG__PRETRAINED_NAME', 'vit_base_patch16_224')
     batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 8))  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
