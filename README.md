@@ -108,6 +108,67 @@ Key parameters in 'TrainingConfig':
 - lr: Learning rate.
 - num_workers: Number of subprocesses for data loading.
 
+### Environment Variables
+
+All configuration parameters can be overridden using environment variables. This allows for flexible deployment without modifying the source code.
+
+#### Model Configuration Variables
+
+| Environment Variable | Type | Description |
+|---------------------|------|-------------|
+| `APPCONFIG__IMAGE_SIZE` | int | Input image size for the model |
+| `APPCONFIG__PATCH_SIZE` | int | Size of image patches |
+| `APPCONFIG__IN_CHANS` | int | Number of input channels (RGB) |
+| `APPCONFIG__EMBED_DIM` | int | Embedding dimension |
+| `APPCONFIG__DEPTH` | int | Number of transformer blocks |
+| `APPCONFIG__NUM_HEADS` | int | Number of attention heads |
+| `APPCONFIG__MLP_RATIO` | float | MLP hidden dimension ratio |
+| `APPCONFIG__DROP_RATE` | float | Dropout rate |
+| `APPCONFIG__ATTN_DROP_RATE` | float | Attention dropout rate |
+| `APPCONFIG__DROP_PATH_RATE` | float | Drop path rate |
+| `APPCONFIG__QKV_BIAS` | bool | Use bias in QKV projections (`true`, `1`, `yes` for true; `false`, `0`, `no` for false; values are case-insensitive) |
+| `APPCONFIG__NUM_CLASSES` | int | Number of action classes (HMDB51) |
+| `APPCONFIG__SMIF_WINDOW` | int | SMIF temporal window size |
+
+#### Training Configuration Variables
+
+| Environment Variable | Type | Description |
+|---------------------|------|-------------|
+| `APPCONFIG__DATA_ROOT` | str | Path to dataset directory |
+| `APPCONFIG__WEIGHTS_DIR` | str | Directory for pretrained weights |
+| `APPCONFIG__PRETRAINED_NAME` | str | Name of pretrained model |
+| `APPCONFIG__BATCH_SIZE` | int | Batch size for training |
+| `APPCONFIG__NUM_FRAMES` | int | Number of frames per video |
+| `APPCONFIG__FRAME_STRIDE` | int | Stride for frame sampling |
+| `APPCONFIG__LR` | float | Learning rate |
+| `APPCONFIG__EPOCHS` | int | Number of training epochs |
+| `APPCONFIG__VAL_RATIO` | float | Validation split ratio |
+| `APPCONFIG__SEED` | int | Random seed for reproducibility |
+| `APPCONFIG__NUM_WORKERS` | int | Number of data loader workers |
+
+#### Example Usage
+
+**Windows (PowerShell):**
+```powershell
+$env:APPCONFIG__BATCH_SIZE=4
+$env:APPCONFIG__EPOCHS=20
+$env:APPCONFIG__LR=0.0001
+python train.py
+```
+
+**macOS/Linux (Bash):**
+```bash
+export APPCONFIG__BATCH_SIZE=4
+export APPCONFIG__EPOCHS=20
+export APPCONFIG__LR=0.0001
+python train.py
+```
+
+**Inline (macOS/Linux only):**
+```bash
+APPCONFIG__BATCH_SIZE=4 APPCONFIG__EPOCHS=20 python train.py
+```
+
 ## Apple Silicon (MacBook) Support
 
 This project is optimized for macOS devices with Apple Silicon (M1/M2/M3/M4). The code automatically detects the hardware and uses the Metal Performance Shaders (MPS) backend instead of CPU.
