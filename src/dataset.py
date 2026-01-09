@@ -124,7 +124,76 @@ class HMDB51Dataset(Dataset):
         video = self.transform(video)
         return video, label
 
+class TestDataset(Dataset):
+    """Dataset for test data without labels (Kaggle competition format)."""
+
+    def __init__(self, root: str, num_frames: int, frame_stride: int, image_size: int = 224):
+        super().__init__()
+        self.root = Path(root)
+        if not self.root.is_dir():
+            raise FileNotFoundError(f"Test data root not found: {self.root}")
+
+        # Collect all video directories (numbered folders: 0, 1, 2, ...)
+        self.video_dirs = sorted(
+            [d for d in self.root.iterdir() if d.is_dir()],
+            key=lambda x: int(x.name) if x.name.isdigit() else x.name
+        )
+
+        # Collect frame paths for each video
+        self.samples = []
+        for video_dir in self.video_dirs:
+            frame_paths = sorted([
+                p for p in video_dir.iterdir()
+                if p.suffix.lower() in {".jpg", ".png", ".jpeg"}
+            ])
+            if frame_paths:
+                self.samples.append((int(video_dir.name), frame_paths))
+
+        if not self.samples:
+            raise ValueError(f"No valid video samples found in {self.root}")
+
+        self.num_frames = num_frames
+        self.frame_stride = max(1, frame_stride)
+        self.transform = VideoTransform(image_size, is_train=False)
+        self.to_tensor = transforms.ToTensor()
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def _select_indices(self, total: int) -> torch.Tensor:
+        if total == 1:
+            return torch.zeros(self.num_frames, dtype=torch.long)
+        steps = max(self.num_frames * self.frame_stride, self.num_frames)
+        grid = torch.linspace(0, total - 1, steps=steps)
+        idxs = grid[:: self.frame_stride].long()
+        if idxs.numel() < self.num_frames:
+            pad = idxs.new_full((self.num_frames - idxs.numel(),), idxs[-1].item())
+            idxs = torch.cat([idxs, pad], dim=0)
+        return idxs[: self.num_frames]
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        video_id, frame_paths = self.samples[idx]
+        total = len(frame_paths)
+        idxs = self._select_indices(total)
+
+        frames = []
+        for i in idxs:
+            path = frame_paths[int(i.item())]
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                frames.append(self.to_tensor(img))
+
+        video = torch.stack(frames)
+        video = self.transform(video)
+        return video, video_id
+
 def collate_fn(batch):
     videos = torch.stack([item[0] for item in batch])
     labels = torch.tensor([item[1] for item in batch], dtype=torch.long)
     return videos, labels
+
+def test_collate_fn(batch):
+    """Collate function for test dataset (returns video IDs instead of labels)."""
+    videos = torch.stack([item[0] for item in batch])
+    video_ids = torch.tensor([item[1] for item in batch], dtype=torch.long)
+    return videos, video_ids

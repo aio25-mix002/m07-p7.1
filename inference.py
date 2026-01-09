@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
-from src.dataset import HMDB51Dataset, collate_fn
+from src.dataset import TestDataset, test_collate_fn
 from src.model import LSViTForAction
 from src.config import ModelConfig
 
@@ -90,14 +90,11 @@ def main():
         print("Model loaded")
 
     print("\nLoading test dataset...")
-    test_dataset = HMDB51Dataset(
+    test_dataset = TestDataset(
         root=args.data_root,
-        split='val',
         num_frames=args.num_frames,
         frame_stride=args.frame_stride,
-        image_size=args.image_size,
-        val_ratio=args.val_ratio,
-        seed=args.seed
+        image_size=args.image_size
     )
     test_loader = DataLoader(
         test_dataset,
@@ -105,9 +102,39 @@ def main():
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
-        collate_fn=collate_fn
+        collate_fn=test_collate_fn
     )
     print(f"Test samples: {len(test_dataset)}")
+
+    # Run inference
+    print("\nRunning inference...")
+    predictions = []
+    video_ids = []
+
+    with torch.no_grad():
+        for batch_idx, (videos, ids) in enumerate(test_loader):
+            videos = videos.to(device)
+            outputs = model(videos)
+            preds = outputs.argmax(dim=1)
+
+            predictions.extend(preds.cpu().numpy())
+            video_ids.extend(ids.cpu().numpy())
+
+            if (batch_idx + 1) % 10 == 0:
+                print(f"Processed {(batch_idx + 1) * args.batch_size}/{len(test_dataset)} samples")
+
+    print(f"\nInference complete! Processed {len(predictions)} videos")
+
+    # Map predictions to class names
+    if 'classes' in checkpoint:
+        class_names = checkpoint['classes']
+        predicted_classes = [class_names[pred] for pred in predictions]
+    else:
+        predicted_classes = [str(pred) for pred in predictions]
+
+    # Create submission
+    submission_path = Path(args.submission_file)
+    kaggle_submit(predicted_classes, submission_path, submit=args.submit)
 
 
 if __name__ == "__main__":
