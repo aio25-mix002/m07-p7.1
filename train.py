@@ -89,6 +89,8 @@ def main():
 
     # Loop
     best_acc = 0.0
+    best_epoch = 0
+    epochs_without_improvement = 0
 
     # Create checkpoint directory with optional experiment name suffix
     checkpoint_dir = t_cfg.checkpoint_dir
@@ -126,6 +128,8 @@ def main():
 
         if val_acc > best_acc:
             best_acc = val_acc
+            best_epoch = epoch + 1
+            epochs_without_improvement = 0
 
             # Prepare training parameters
             training_params = {
@@ -141,6 +145,7 @@ def main():
                 "val_loss": val_loss,
                 "val_acc": val_acc,
                 "best_acc": best_acc,
+                "best_epoch": best_epoch,
             }
 
             # Save checkpoint with metrics
@@ -155,6 +160,14 @@ def main():
                 train_classes=train_ds.classes,
             )
             logger.info(f"New best model saved! ({best_acc:.4f})")
+        else:
+            epochs_without_improvement += 1
+            logger.info(f"No improvement for {epochs_without_improvement} epoch(s)")
+            
+            if epochs_without_improvement >= t_cfg.patience:
+                logger.info(f"Early stopping triggered! No improvement for {t_cfg.patience} epochs.")
+                logger.info(f"Best accuracy: {best_acc:.4f} at epoch {best_epoch}")
+                break
 
 
 if __name__ == "__main__":
