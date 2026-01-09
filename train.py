@@ -1,4 +1,5 @@
 # train.py
+import argparse
 import torch
 from torch.utils.data import DataLoader
 from src.config import ModelConfig, TrainingConfig
@@ -7,10 +8,57 @@ from src.model import LSViTForAction
 from src.utils import set_seed, load_vit_checkpoint, ensure_dir
 from src.engine import train_one_epoch, evaluate
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train LS-ViT model for action recognition')
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='Number of training epochs (overrides config)')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Learning rate')
+    parser.add_argument('--data_root', type=str, default=None,
+                        help='Path to training data directory')
+    parser.add_argument('--num_frames', type=int, default=None,
+                        help='Number of frames to sample from each video')
+    parser.add_argument('--frame_stride', type=int, default=None,
+                        help='Stride between sampled frames')
+    parser.add_argument('--num_workers', type=int, default=None,
+                        help='Number of data loading workers')
+    parser.add_argument('--val_ratio', type=float, default=None,
+                        help='Validation split ratio')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducibility')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints',
+                        help='Directory to save checkpoints')
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
+
     # Config
     t_cfg = TrainingConfig()
     m_cfg = ModelConfig()
+
+    # Override config with command line arguments
+    if args.epochs is not None:
+        t_cfg.epochs = args.epochs
+    if args.batch_size is not None:
+        t_cfg.batch_size = args.batch_size
+    if args.lr is not None:
+        t_cfg.lr = args.lr
+    if args.data_root is not None:
+        t_cfg.data_root = args.data_root
+    if args.num_frames is not None:
+        t_cfg.num_frames = args.num_frames
+    if args.frame_stride is not None:
+        t_cfg.frame_stride = args.frame_stride
+    if args.num_workers is not None:
+        t_cfg.num_workers = args.num_workers
+    if args.val_ratio is not None:
+        t_cfg.val_ratio = args.val_ratio
+    if args.seed is not None:
+        t_cfg.seed = args.seed
+
     set_seed(t_cfg.seed)
     
     # Lấy device từ property đã sửa
@@ -58,7 +106,18 @@ def main():
     
     # Loop
     best_acc = 0.0
-    ensure_dir('./checkpoints')
+    ensure_dir(args.checkpoint_dir)
+
+    print(f"\n{'='*60}")
+    print(f"Training Configuration:")
+    print(f"  Epochs: {t_cfg.epochs}")
+    print(f"  Batch size: {t_cfg.batch_size}")
+    print(f"  Learning rate: {t_cfg.lr}")
+    print(f"  Num frames: {t_cfg.num_frames}")
+    print(f"  Frame stride: {t_cfg.frame_stride}")
+    print(f"  Val ratio: {t_cfg.val_ratio}")
+    print(f"  Checkpoint dir: {args.checkpoint_dir}")
+    print(f"{'='*60}\n")
     
     for epoch in range(t_cfg.epochs):
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
@@ -71,8 +130,11 @@ def main():
         
         if val_acc > best_acc:
             best_acc = val_acc
-            torch.save(model.state_dict(), "./checkpoints/best_model.pth")
+            checkpoint_path = f"{args.checkpoint_dir}/best_model.pth"
+            torch.save(model.state_dict(), checkpoint_path)
             print(f"New best model saved! ({best_acc:.4f})")
+
+    print(f"\nTraining complete! Best validation accuracy: {best_acc:.4f}")
 
 if __name__ == "__main__":
     main()
