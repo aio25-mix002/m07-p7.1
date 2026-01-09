@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import os
 import torch
 import os
 
@@ -18,10 +19,26 @@ class ModelConfig:
     num_classes: int = int(os.getenv('APPCONFIG__NUM_CLASSES', 51))
     smif_window: int = int(os.getenv('APPCONFIG__SMIF_WINDOW', 5))
 
+def _get_default_data_root() -> str:
+    """Get default data root based on environment."""
+    if os.path.exists('/kaggle'):
+        # In Kaggle environment, use /kaggle/working/data
+        return '/kaggle/working/data/data_train'
+    else:
+        # Local environment
+        return './hmdb51_data'
+
+def _get_default_weights_dir() -> str:
+    """Get default weights directory based on environment."""
+    if os.path.exists('/kaggle'):
+        return '/kaggle/working/weights'
+    else:
+        return './weights'
+
 @dataclass
 class TrainingConfig:
-    data_root: str = os.getenv('APPCONFIG__DATA_ROOT', './hmdb51_data')
-    weights_dir: str = os.getenv('APPCONFIG__WEIGHTS_DIR', './weights')
+    data_root: str = field(default_factory=lambda: os.getenv('APPCONFIG__DATA_ROOT') or _get_default_data_root())
+    weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR' or _get_default_weights_dir())
     pretrained_name: str = os.getenv('APPCONFIG__PRETRAINED_NAME', 'vit_base_patch16_224')
     batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 8))  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
