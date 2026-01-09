@@ -77,13 +77,13 @@ def save_checkpoint(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Save model checkpoint
-    timestamp = datetime.now()
+    timestamp = datetime.now().isoformat()
     model_path = run_dir / "best_model.pth"
     model_to_save = model.module if hasattr(model, "module") else model
     torch.save(
         {
-            "timestamp": timestamp,
             "model": model_to_save.state_dict(),
+            "timestamp": timestamp,
             "val_acc": val_acc,
             "train_classes": train_classes,
             "metrics": metrics,
