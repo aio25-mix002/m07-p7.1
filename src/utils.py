@@ -68,10 +68,13 @@ def save_checkpoint(
     """Save checkpoint in a timestamped folder with metrics.json
 
     Args:
-        model: The model to save
-        checkpoint_dir: Base checkpoint directory
-        metrics: Dictionary containing training metrics (e.g., train_loss, train_acc, val_loss, val_acc, epoch)
-        training_params: Dictionary containing training parameters (e.g., lr, batch_size, num_frames, etc.)
+        model: The model to save.
+        checkpoint_root_dir: Base directory where checkpoints for different runs are stored.
+        checkpoint_name: Name of the current run/checkpoint subdirectory.
+        metrics: Dictionary containing training metrics (e.g., train_loss, train_acc, val_loss, val_acc, epoch).
+        training_params: Dictionary containing training parameters (e.g., lr, batch_size, num_frames, etc.).
+        val_acc: Best validation accuracy achieved for this checkpoint.
+        train_classes: List of class labels used during training.
     """
     run_dir = Path(checkpoint_root_dir) / checkpoint_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +82,14 @@ def save_checkpoint(
     # Save model checkpoint
     timestamp = datetime.now().isoformat()
     model_path = run_dir / "best_model.pth"
-    model_to_save = model.module if hasattr(model, "module") else model
+
+    # Extract the underlying model if it's compiled or wrapped
+    model_to_save = model
+    if hasattr(model_to_save, "_orig_mod"):  # torch.compile wrapper
+        model_to_save = model_to_save._orig_mod
+    if hasattr(model_to_save, "module"):  # DataParallel/DistributedDataParallel wrapper
+        model_to_save = model_to_save.module
+
     torch.save(
         {
             "model": model_to_save.state_dict(),
