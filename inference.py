@@ -139,13 +139,20 @@ def main():
                 print(f"Processed {(batch_idx + 1) * args.batch_size}/{len(test_dataset)} samples")
 
     print(f"\nInference complete! Processed {len(predictions)} videos")
+    # !!! Late update
+    with open('./classname.txt', 'r') as f:
+        class_names = [line.strip() for line in f]
 
-    # Map predictions to class names
-    if 'classes' in checkpoint:
-        class_names = checkpoint['classes']
-        predicted_classes = [class_names[pred] for pred in predictions]
-    else:
-        predicted_classes = [str(pred) for pred in predictions]
+    # predicted_classes = [class_names[pred] for pred in predictions]
+
+    # Use these class names for predictions
+    predicted_classes = [class_names[pred] for pred in predictions]
+    # # Map predictions to class names
+    # if 'classes' in checkpoint:
+    #     class_names = checkpoint['classes']
+    #     predicted_classes = [class_names[pred] for pred in predictions]
+    # else:
+    #     predicted_classes = [str(pred) for pred in predictions]
 
     # Create submission
     submission_path = Path(args.submission_file)
