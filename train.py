@@ -140,10 +140,19 @@ def main():
         )
         
     # Loss Function
+    print(f"Loss Configuration:")
     if mixup_fn is not None:
+        # Khi dùng Mixup, SoftTargetCrossEntropy thực chất là một dạng Label Smoothing động (rất mạnh)
+        print("  -> Using SoftTargetCrossEntropy (Mixup/Cutmix enabled)")
         train_criterion = SoftTargetCrossEntropy()
     else:
-        train_criterion = nn.CrossEntropyLoss(label_smoothing=t_cfg.label_smoothing)
+        if t_cfg.label_smoothing > 0:
+            print(f"  -> Using CrossEntropyLoss with Label Smoothing: epsilon={t_cfg.label_smoothing}")
+            train_criterion = nn.CrossEntropyLoss(label_smoothing=t_cfg.label_smoothing)
+        
+        else:
+            print("  -> Using Standard CrossEntropyLoss (No smoothing)")
+            train_criterion = nn.CrossEntropyLoss()
         
     val_criterion = nn.CrossEntropyLoss()
     
