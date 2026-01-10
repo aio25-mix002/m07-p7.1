@@ -10,6 +10,7 @@ from src.utils import set_seed, load_vit_checkpoint, ensure_dir
 from src.engine import train_one_epoch, evaluate
 from timm.data.mixup import Mixup
 from timm.loss import SoftTargetCrossEntropy
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train LS-ViT model for action recognition')
@@ -24,6 +25,52 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Directory to save checkpoints')
     return parser.parse_args()
+
+def build_optimizer_params(model, base_lr, weight_decay, layer_decay=0.75):
+    """
+    Phân chia tham số để áp dụng Layer-wise Learning Rate Decay.
+    LR sẽ giảm dần từ lớp cuối về lớp đầu theo tỷ lệ layer_decay.
+    """
+    param_groups = {}
+    
+    num_layers = len(model.backbone.blocks) + 1 
+    scales = list(layer_decay ** i for i in reversed(range(num_layers)))
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        # 1. Xác định layer id
+        if name.startswith("backbone.cls_token") or name.startswith("backbone.pos_embed") or name.startswith("backbone.patch_embed"):
+            layer_id = 0
+        elif name.startswith("backbone.blocks"):
+            # Lấy index của block: backbone.blocks.0. ... -> id = 1
+            try:
+                layer_id = int(name.split('.')[2]) + 1
+            except:
+                layer_id = num_layers - 1
+        else:
+            # Head và các module khác (SMIF, LMI) nhận LR lớn nhất
+            layer_id = num_layers - 1
+            
+        # 2. Xác định group key (có weight decay hay không)
+        # Không áp dụng weight decay cho bias và norm layers
+        if param.ndim == 1 or name.endswith(".bias"):
+            group_name = f"no_decay_layer_{layer_id}"
+            this_decay = 0.0
+        else:
+            group_name = f"decay_layer_{layer_id}"
+            this_decay = weight_decay
+            
+        if group_name not in param_groups:
+            param_groups[group_name] = {
+                "params": [],
+                "weight_decay": this_decay,
+                "lr": base_lr * scales[layer_id],
+            }
+        param_groups[group_name]["params"].append(param)
+        
+    return list(param_groups.values())
 
 def main():
     args = parse_args()
@@ -66,13 +113,10 @@ def main():
         "batch_size": t_cfg.batch_size,
         "num_workers": t_cfg.num_workers,
         "pin_memory": True,
-        
-        # Tối ưu hóa: Giữ worker sống trong RAM và prefetch dữ liệu
         "persistent_workers": True if t_cfg.num_workers > 0 else False,
         "prefetch_factor": 4 if t_cfg.num_workers > 0 else None,
     }
 
-    # Train Loader: Cần drop_last=True cho Mixup và shuffle=True
     train_loader = DataLoader(
         train_ds, 
         shuffle=True,
@@ -81,13 +125,11 @@ def main():
         **loader_kwargs 
     )
 
-
     val_kwargs = loader_kwargs.copy()
-    
     val_loader = DataLoader(
         val_ds, 
         shuffle=False,
-        drop_last=False, # Val cần giữ lại hết mẫu
+        drop_last=False, 
         collate_fn=collate_fn,
         **val_kwargs
     )
@@ -108,8 +150,6 @@ def main():
         model = nn.DataParallel(model)
         
     if os.name != 'nt' and torch.cuda.is_available():
-        # Lưu ý: compile đôi khi có thể gây lỗi với Mixup trên một số ver torch cũ
-        # Nếu gặp lỗi lạ, thử comment dòng này lại
         print("Compiling model with torch.compile...")
         try:
             model = torch.compile(model)
@@ -118,12 +158,36 @@ def main():
     else:
         print("Chạy trên Single GPU/CPU.")
 
-    # Training Setup
-    optimizer = torch.optim.AdamW(model.parameters(), lr=t_cfg.lr)
+    # Training Setup: Optimizer với Layer Decay
+    params = build_optimizer_params(
+        model, 
+        base_lr=t_cfg.lr, 
+        weight_decay=0.05,  
+        layer_decay=0.75    
+    )
+    optimizer = torch.optim.AdamW(params, lr=t_cfg.lr)
+
+   
+    warmup_epochs = 5
     
+    # 1. Warmup: Tăng từ lr*0.01 lên lr*1.0
+    warmup_scheduler = LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+    )
+
+    # 2. Main: Giảm theo hình Cosine từ epoch 5 đến hết
+    main_scheduler = CosineAnnealingLR(
+        optimizer, T_max=t_cfg.epochs - warmup_epochs, eta_min=1e-6
+    )
+
+    # 3. Kết hợp tuần tự
+    scheduler = SequentialLR(
+        optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[warmup_epochs]
+    )
+    # =======================================================
+
     # Mixup Setup
     mixup_fn = None
-    # Kiểm tra an toàn cho cutmix_minmax (nếu config cũ chưa có)
     cutmix_minmax = getattr(t_cfg, 'cutmix_minmax', None)
     
     mixup_active = t_cfg.mixup_alpha > 0 or t_cfg.cutmix_alpha > 0 or cutmix_minmax is not None
@@ -142,14 +206,12 @@ def main():
     # Loss Function
     print(f"Loss Configuration:")
     if mixup_fn is not None:
-        # Khi dùng Mixup, SoftTargetCrossEntropy thực chất là một dạng Label Smoothing động (rất mạnh)
         print("  -> Using SoftTargetCrossEntropy (Mixup/Cutmix enabled)")
         train_criterion = SoftTargetCrossEntropy()
     else:
         if t_cfg.label_smoothing > 0:
             print(f"  -> Using CrossEntropyLoss with Label Smoothing: epsilon={t_cfg.label_smoothing}")
             train_criterion = nn.CrossEntropyLoss(label_smoothing=t_cfg.label_smoothing)
-        
         else:
             print("  -> Using Standard CrossEntropyLoss (No smoothing)")
             train_criterion = nn.CrossEntropyLoss()
@@ -179,13 +241,13 @@ def main():
     print(f"  Epochs: {t_cfg.epochs}")
     print(f"  Batch size: {t_cfg.batch_size}")
     print(f"  Workers: {t_cfg.num_workers}")
-    print(f"  Persistent Workers: {loader_kwargs.get('persistent_workers')}")
-    print(f"  Prefetch Factor: {loader_kwargs.get('prefetch_factor')}")
+    print(f"  Scheduler: Warmup ({warmup_epochs} eps) + Cosine Decay")
     print(f"  Checkpoint dir: {args.checkpoint_dir}")
     print(f"{'='*60}\n")
 
     for epoch in range(t_cfg.epochs):
         
+        # Logic Freeze/Unfreeze
         if epoch < 3:
             set_freeze_status(model, freeze_backbone=True)
         else:
@@ -193,15 +255,22 @@ def main():
             
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
         
+        # Training
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, scaler, device, 
             mixup_fn=mixup_fn, criterion=train_criterion
         )
         
-        # Đánh giá dùng val_criterion riêng
+        # === Cập nhật Learning Rate Scheduler sau mỗi epoch ===
+        scheduler.step()
+        
+        # Lấy LR hiện tại để in ra màn hình (Lấy của group cuối cùng - Head)
+        current_lr = scheduler.get_last_lr()[-1]
+        
+        # Evaluation
         val_acc, val_loss = evaluate(model, val_loader, device, criterion=val_criterion)
         
-        print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
+        print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | LR: {current_lr:.6f}")
         print(f"Val Loss: {val_loss:.4f}   | Acc: {val_acc:.4f}")
         
         if val_acc > best_acc:

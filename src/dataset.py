@@ -6,43 +6,79 @@ from typing import List, Tuple, Dict, Optional
 from torch.utils.data import Dataset
 from torchvision import transforms
 import torchvision.transforms.functional as TF
-from torchvision.transforms import InterpolationMode
+from torchvision.transforms import InterpolationMode, RandomErasing
 from PIL import Image
 import numpy as np
+from torchvision.transforms import RandAugment
 
 class VideoTransform:
     def __init__(self, image_size: int, is_train: bool = True):
         self.image_size = image_size
         self.is_train = is_train
-        self.mean = [0.5, 0.5, 0.5]
-        self.std = [0.5, 0.5, 0.5]
+        self.mean = [0.485, 0.456, 0.406] 
+        self.std = [0.229, 0.224, 0.225]
+        
+        if is_train:
+            self.rand_aug = RandAugment(num_ops=2, magnitude=9)
+            
+            self.random_erasing = RandomErasing(p=0.25, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False)
 
     def __call__(self, frames: torch.Tensor) -> torch.Tensor:
-        # frames: [T, C, H, W]
+        # frames: [T, C, H, W] tensor (0-1 float)
+        
         if self.is_train:
+            
             h, w = frames.shape[-2:]
-            scale = random.uniform(0.8, 1.0)
+            scale = random.uniform(0.8, 1.0) 
             new_h, new_w = int(h * scale), int(w * scale)
+            
+            # Resize cả khối video
             frames = TF.resize(frames, [new_h, new_w], interpolation=InterpolationMode.BILINEAR)
+
 
             i = random.randint(0, max(0, new_h - self.image_size))
             j = random.randint(0, max(0, new_w - self.image_size))
             frames = TF.crop(frames, i, j, min(self.image_size, new_h), min(self.image_size, new_w))
+            
+            
             frames = TF.resize(frames, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
+
+
+            pil_frames = [TF.to_pil_image(f) for f in frames]
+            
+            # Fix seed để augmentation giống hệt nhau trên các frame
+            seed = random.randint(0, 1000000)
+            aug_frames = []
+            for img in pil_frames:
+                random.seed(seed)
+                torch.manual_seed(seed)
+                # RandAugment tự lo Brightness, Contrast, Shear, Translate...
+                img_aug = self.rand_aug(img)
+                aug_frames.append(TF.to_tensor(img_aug))
+            
+            frames = torch.stack(aug_frames) # [T, C, H, W]
+
 
             if random.random() < 0.5:
                 frames = TF.hflip(frames)
             
-            # Color jitter nhẹ
-            if random.random() < 0.3:
-                frames = TF.adjust_brightness(frames, random.uniform(0.9, 1.1))
-            if random.random() < 0.3:
-                frames = TF.adjust_contrast(frames, random.uniform(0.9, 1.1))
-        else:
-            frames = TF.resize(frames, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
+   
+            frames = TF.normalize(frames, self.mean, self.std)
 
-        normalized = [TF.normalize(frame, self.mean, self.std) for frame in frames]
-        return torch.stack(normalized)
+            if random.random() < 0.25:
+                # get_params trả về i, j, h, w, v
+                i, j, h, w, v = self.random_erasing.get_params(frames[0], scale=(0.02, 0.33), ratio=(0.3, 3.3))
+                # Áp dụng vùng xóa đó cho TẤT CẢ frame
+                frames = torch.stack([TF.erase(f, i, j, h, w, v, inplace=False) for f in frames])
+
+        else:
+            # Validation Strategy chuẩn: Resize cạnh ngắn nhất lên 256 -> Center Crop 224
+            # Giúp giữ tỷ lệ ảnh, không bị méo hình
+            frames = TF.resize(frames, 256, interpolation=InterpolationMode.BILINEAR)
+            frames = TF.center_crop(frames, self.image_size)
+            frames = TF.normalize(frames, self.mean, self.std)
+
+        return frames
 
 class HMDB51Dataset(Dataset):
     def __init__(self, root: str, split: str, num_frames: int, frame_stride: int, 
