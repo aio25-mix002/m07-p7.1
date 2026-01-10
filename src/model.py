@@ -18,16 +18,51 @@ class DropPath(nn.Module):
         random_tensor.floor_()
         return x.div(keep_prob) * random_tensor
 
-class PatchEmbed(nn.Module):
+class TubeletEmbed(nn.Module):
+    """3D Tubelet Embedding using 3D convolution to capture spatio-temporal information.
+    
+    Instead of treating each frame independently with 2D convolution, this module uses
+    3D convolution to process temporal windows (tubelets) of frames together.
+    """
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.num_patches = (config.image_size // config.patch_size) ** 2
-        self.proj = nn.Conv2d(config.in_chans, config.embed_dim,
-                              kernel_size=config.patch_size, stride=config.patch_size)
+        # Calculate number of spatial patches per frame
+        self.num_spatial_patches = (config.image_size // config.patch_size) ** 2
+        self.tubelet_size = config.tubelet_size
+        
+        # 3D convolution: (T, H, W) -> (T//tubelet_size, H//patch_size, W//patch_size)
+        self.proj = nn.Conv3d(
+            config.in_chans, 
+            config.embed_dim,
+            kernel_size=(config.tubelet_size, config.patch_size, config.patch_size),
+            stride=(config.tubelet_size, config.patch_size, config.patch_size)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass for tubelet embedding.
+        
+        Args:
+            x: Input tensor of shape (B, T, C, H, W)
+            
+        Returns:
+            Embedded patches of shape (B, num_temporal_tokens, num_spatial_patches, embed_dim)
+        """
+        B, T, C, H, W = x.shape
+        
+        # Reshape to (B, C, T, H, W) for 3D conv
+        x = x.permute(0, 2, 1, 3, 4)
+        
+        # Apply 3D convolution: (B, C, T, H, W) -> (B, embed_dim, T', H', W')
         x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
+        
+        # Get dimensions after convolution
+        B, E, T_new, H_new, W_new = x.shape
+        
+        # Reshape to (B, T', H'*W', E) - treat temporal and spatial dimensions
+        # Flatten spatial dimensions and transpose
+        x = x.permute(0, 2, 3, 4, 1)  # (B, T', H', W', E)
+        x = x.reshape(B, T_new, H_new * W_new, E)  # (B, T', num_patches, E)
+        
         return x
 
 class Mlp(nn.Module):
@@ -169,10 +204,13 @@ class LSViTBackbone(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.patch_embed = PatchEmbed(config)
-        num_patches = self.patch_embed.num_patches
+        self.patch_embed = TubeletEmbed(config)
+        num_spatial_patches = self.patch_embed.num_spatial_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, config.embed_dim))
+        # Spatial positional embedding (for patches within each frame)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_spatial_patches + 1, config.embed_dim))
+        # Temporal positional embedding (for different time steps after tubelet embedding)
+        self.temporal_embed = nn.Parameter(torch.zeros(1, config.max_temporal_tokens, 1, config.embed_dim))
         self.pos_drop = nn.Dropout(config.drop_rate)
         dpr = torch.linspace(0, config.drop_path_rate, steps=config.depth).tolist()
         
@@ -185,11 +223,12 @@ class LSViTBackbone(nn.Module):
         self.norm = nn.LayerNorm(config.embed_dim)
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.temporal_embed, std=0.02)
 
     def _interpolate_pos_encoding(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
         num_patches = N - 1
-        if num_patches == self.patch_embed.num_patches:
+        if num_patches == self.patch_embed.num_spatial_patches:
             return self.pos_embed
         
         cls_pos = self.pos_embed[:, :1]
@@ -205,17 +244,35 @@ class LSViTBackbone(nn.Module):
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
         B, T, C, H, W = video.shape
-        x = video.reshape(B * T, C, H, W)
-        x = self.patch_embed(x)
+        
+        # Apply 3D tubelet embedding: (B, T, C, H, W) -> (B, T', num_patches, embed_dim)
+        x = self.patch_embed(video)
+        B, T_new, num_patches, embed_dim = x.shape
+        
+        # Add temporal positional embedding before flattening
+        # temporal_embed: (1, max_T, 1, E) -> slice to (1, T_new, 1, E) -> broadcast to (B, T_new, num_patches, E)
+        temporal_pos = self.temporal_embed[:, :T_new, :, :]
+        x = x + temporal_pos  # (B, T_new, num_patches, E)
+        
+        # Reshape to process all temporal tokens together: (B*T', num_patches, embed_dim)
+        x = x.reshape(B * T_new, num_patches, embed_dim)
+        
+        # Add cls token to each temporal position
         cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
+        
+        # Add spatial positional encoding
         pos_embed = self._interpolate_pos_encoding(x)
         x = x + pos_embed
         x = self.pos_drop(x)
+        
+        # Process through transformer blocks
         for block in self.blocks:
-            x = block(x, B, T)
+            x = block(x, B, T_new)
+        
         x = self.norm(x)
-        x = x.view(B, T, x.shape[1], x.shape[2])
+        # Reshape back to (B, T', num_patches+1, embed_dim)
+        x = x.view(B, T_new, x.shape[1], x.shape[2])
         return x
 
 class LSViTForAction(nn.Module):

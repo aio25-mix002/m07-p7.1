@@ -16,6 +16,7 @@ class ModelConfig:
         """Load configuration from environment variables."""
         self.image_size: int = int(os.getenv('APPCONFIG__IMAGE_SIZE', 224))
         self.patch_size: int = int(os.getenv('APPCONFIG__PATCH_SIZE', 16))
+        self.tubelet_size: int = int(os.getenv('APPCONFIG__TUBELET_SIZE', 2))
         self.in_chans: int = int(os.getenv('APPCONFIG__IN_CHANS', 3))
         self.embed_dim: int = int(os.getenv('APPCONFIG__EMBED_DIM', 768))
         self.depth: int = int(os.getenv('APPCONFIG__DEPTH', 12))
@@ -27,6 +28,9 @@ class ModelConfig:
         self.qkv_bias: bool = os.getenv('APPCONFIG__QKV_BIAS', 'True').lower() in ('true', '1', 'yes')
         self.num_classes: int = int(os.getenv('APPCONFIG__NUM_CLASSES', 51))
         self.smif_window: int = int(os.getenv('APPCONFIG__SMIF_WINDOW', 5))
+        # Max temporal tokens for positional embedding (num_frames // tubelet_size)
+        # Default 16 frames / 2 tubelet_size = 8, but allow override for longer videos
+        self.max_temporal_tokens: int = int(os.getenv('APPCONFIG__MAX_TEMPORAL_TOKENS', 32))
     
     def reload(self):
         """Reload configuration from environment variables. Call explicitly if env vars change."""
