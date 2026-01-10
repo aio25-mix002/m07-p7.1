@@ -21,14 +21,57 @@ class DropPath(nn.Module):
 class PatchEmbed(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.num_patches = (config.image_size // config.patch_size) ** 2
-        self.proj = nn.Conv2d(config.in_chans, config.embed_dim,
-                              kernel_size=config.patch_size, stride=config.patch_size)
-
+        self.image_size = config.image_size
+        self.patch_size = config.patch_size
+        self.tubelet_size = config.tubelet_size
+        self.embed_dim = config.embed_dim
+        
+        # Số lượng patch không gian (Spatial patches)
+        self.num_spatial_patches = (config.image_size // config.patch_size) ** 2
+        # Tổng số patch sẽ được tính động trong forward tùy thuộc vào T
+        
+        if self.tubelet_size > 1:
+            # === UPGRADE: 3D Convolution (Tubelet) ===
+            # Kernel: (t, h, w), Stride: (t, h, w) -> Giảm kích thước cả thời gian và không gian
+            self.proj = nn.Conv3d(
+                config.in_chans, 
+                config.embed_dim,
+                kernel_size=(self.tubelet_size, config.patch_size, config.patch_size),
+                stride=(self.tubelet_size, config.patch_size, config.patch_size)
+            )
+        else:
+            # 2D Convolution (Giữ nguyên logic cũ nếu tubelet_size=1)
+            self.proj = nn.Conv2d(
+                config.in_chans, 
+                config.embed_dim,
+                kernel_size=config.patch_size, 
+                stride=config.patch_size
+            )
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
-        return x
+        # Input x shape: 
+        # Nếu 3D: [B, C, T, H, W]
+        # Nếu 2D: [B * T, C, H, W]
+        
+        if self.tubelet_size > 1:
+            # x: [B, C, T, H, W] -> Output: [B, EmbedDim, T_new, H_new, W_new]
+            x = self.proj(x)
+            
+            # Flatten: [B, EmbedDim, T_new, H_new, W_new] -> [B, EmbedDim, N_tokens]
+            # N_tokens = T_new * H_new * W_new
+            B, D, T_new, H_new, W_new = x.shape
+            
+            # Chúng ta cần reshape về [B * T_new, N_spatial, D] để tương thích với các Block phía sau
+            # Transformer Block thường mong đợi: [Batch_Effective, Num_Tokens, Dim]
+            x = x.permute(0, 2, 3, 4, 1) # [B, T_new, H_new, W_new, D]
+            x = x.reshape(B * T_new, H_new * W_new, D)
+            
+            return x, T_new
+            
+        else:
+            # Logic cũ cho 2D
+            x = self.proj(x) # [BT, D, H_new, W_new]
+            x = x.flatten(2).transpose(1, 2) # [BT, N_spatial, D]
+            return x, None
 
 class Mlp(nn.Module):
     def __init__(self, dim: int, mlp_ratio: float, drop: float):
@@ -170,10 +213,16 @@ class LSViTBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.patch_embed = PatchEmbed(config)
-        num_patches = self.patch_embed.num_patches
+        
+        # Chỉ khởi tạo pos_embed cho không gian (Spatial)
+        # Chúng ta sẽ cộng pos_embed này cho từng frame (hoặc từng tubelet)
+        num_spatial_patches = self.patch_embed.num_spatial_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, config.embed_dim))
+        
+        # Pos embed: [1, N_spatial + 1, Dim]
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_spatial_patches + 1, config.embed_dim))
         self.pos_drop = nn.Dropout(config.drop_rate)
+        
         dpr = torch.linspace(0, config.drop_path_rate, steps=config.depth).tolist()
         
         self.blocks = nn.ModuleList([
@@ -186,49 +235,92 @@ class LSViTBackbone(nn.Module):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
-    def _interpolate_pos_encoding(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, C = x.shape
-        num_patches = N - 1
-        if num_patches == self.patch_embed.num_patches:
+    def _interpolate_pos_encoding(self, x: torch.Tensor, current_w: int, current_h: int) -> torch.Tensor:
+        # x: [BT, N, C] - nhưng ở đây chúng ta chỉ quan tâm N_spatial để interpolate
+        # pos_embed gốc: [1, N_origin + 1, C]
+        
+        N = x.shape[1] - 1 # Trừ CLS token
+        num_patches_origin = self.patch_embed.num_spatial_patches
+        
+        if N == num_patches_origin:
             return self.pos_embed
         
         cls_pos = self.pos_embed[:, :1]
         patch_pos = self.pos_embed[:, 1:]
         dim = patch_pos.shape[-1]
-        gs_old = int(math.sqrt(patch_pos.shape[1]))
-        gs_new = int(math.sqrt(num_patches))
         
-        patch_pos = patch_pos.reshape(1, gs_old, gs_old, dim).permute(0, 3, 1, 2)
-        patch_pos = F.interpolate(patch_pos, size=(gs_new, gs_new), mode="bicubic", align_corners=False)
-        patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, gs_new * gs_new, dim)
+        w0 = h0 = int(math.sqrt(num_patches_origin))
+        
+        
+        patch_pos = patch_pos.reshape(1, h0, w0, dim).permute(0, 3, 1, 2)
+        
+       
+        w_new = int(math.sqrt(N)) # Giả sử vuông
+        
+        patch_pos = F.interpolate(patch_pos, size=(w_new, w_new), mode="bicubic", align_corners=False)
+        patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, -1, dim)
+        
         return torch.cat([cls_pos, patch_pos], dim=1)
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
+        
         B, T, C, H, W = video.shape
-        x = video.reshape(B * T, C, H, W)
-        x = self.patch_embed(x)
-        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
+        
+        if self.config.tubelet_size > 1:
+            
+            x_input = video.permute(0, 2, 1, 3, 4) 
+            x, T_new = self.patch_embed(x_input) 
+            
+            curr_T = T_new
+            curr_B = B
+        else:
+            # === Xử lý 2D  ===
+            x_input = video.reshape(B * T, C, H, W)
+            x, _ = self.patch_embed(x_input)
+            curr_T = T
+            curr_B = B
+
+        # === Thêm CLS Token & Pos Embed ===
+        # x đang là [BT, N_spatial, D]
+        # Mở rộng CLS token cho từng frame/tubelet
+        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1) # [BT, 1, D]
         x = torch.cat((cls_tokens, x), dim=1)
-        pos_embed = self._interpolate_pos_encoding(x)
+        
+        
+        pos_embed = self._interpolate_pos_encoding(x, 0, 0) # Argument w,h tạm bỏ qua logic tính toán chi tiết
         x = x + pos_embed
         x = self.pos_drop(x)
+        
+      
         for block in self.blocks:
-            x = block(x, B, T)
+            # Truyền vào curr_B và curr_T (T đã thay đổi nếu dùng Tubelet)
+            x = block(x, curr_B, curr_T)
+            
         x = self.norm(x)
-        x = x.view(B, T, x.shape[1], x.shape[2])
+        
+        # Reshape về [B, T_new, N_tokens, C]
+        x = x.view(curr_B, curr_T, x.shape[1], x.shape[2])
         return x
 
 class LSViTForAction(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
+        # SMIF Module vẫn hoạt động trên video gốc để bắt chuyển động nhanh
         self.smif = SMIFModule(config.in_chans, window_size=config.smif_window)
         self.backbone = LSViTBackbone(config)
         self.head = nn.Linear(config.embed_dim, config.num_classes)
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
-        x = self.smif(video)
-        feats = self.backbone(x)
-        cls_tokens = feats[:, :, 0]
-        pooled = cls_tokens.mean(dim=1)
+       
+        x = self.smif(video) 
+       
+        feats = self.backbone(x) # Output: [B, T_new, N_tokens, C]
+       
+        cls_tokens = feats[:, :, 0] # [B, T_new, C]
+        
+       
+        pooled = cls_tokens.mean(dim=1) # [B, C]
+        
+ 
         logits = self.head(pooled)
         return logits

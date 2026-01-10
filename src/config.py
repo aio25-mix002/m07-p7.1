@@ -17,6 +17,7 @@ class ModelConfig:
     qkv_bias: bool = os.getenv('APPCONFIG__QKV_BIAS', 'True').lower() in ('true', '1', 'yes')
     num_classes: int = int(os.getenv('APPCONFIG__NUM_CLASSES', 51))
     smif_window: int = int(os.getenv('APPCONFIG__SMIF_WINDOW', 5))
+    tubelet_size: int = int(os.getenv('APPCONFIG__TUBELET_SIZE', 2)) #3D EMBEDDING
 
 def _get_default_data_root() -> str:
     """Get default data root based on environment."""
@@ -39,7 +40,7 @@ class TrainingConfig:
     data_root: str = field(default_factory=lambda: os.getenv('APPCONFIG__DATA_ROOT') or _get_default_data_root())
     weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR') or _get_default_weights_dir())
     pretrained_name: str = os.getenv('APPCONFIG__PRETRAINED_NAME', 'vit_base_patch16_224')
-    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 12))  # Trên Mac có thể cần giảm batch size nếu RAM ít
+    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 14))  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
     frame_stride: int = int(os.getenv('APPCONFIG__FRAME_STRIDE', 2))
     lr: float = float(os.getenv('APPCONFIG__LR', 1e-4))
@@ -52,9 +53,9 @@ class TrainingConfig:
     cutmix_alpha: float = float(os.getenv('APPCONFIG__CUTMIX_ALPHA', 1.0))
     mixup_prob: float = float(os.getenv('APPCONFIG__MIXUP_PROB', 1.0)) # Xác suất áp dụng
     mixup_switch_prob: float = 0.5 # Xác suất chuyển đổi giữa mixup và cutmix
-    mixup_mode: str = 'batch' # 'batch', 'pair', or 'elem'
+    mixup_mode: str = 'batch'
     label_smoothing: float = float(os.getenv('APPCONFIG__LABEL_SMOOTHING', 0.1))
-    # LOGIC CHỌN DEVICE: Ưu tiên MPS cho Mac -> CUDA -> CPU
+  
     @property
     def device(self) -> str:
         if torch.backends.mps.is_available():
