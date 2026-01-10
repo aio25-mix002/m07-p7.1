@@ -4,14 +4,30 @@ from loguru import logger as loguru_logger
 
 
 class LoggingService:
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, log_level="INFO"):
+        """Ensure only one instance of LoggingService exists (singleton pattern)"""
+        if cls._instance is None:
+            cls._instance = super(LoggingService, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, log_level="INFO"):
-        """Initialize the logger with the specified log level"""
+        """Initialize the logger with the specified log level (only once)"""
+        # Only initialize once, even if __init__ is called multiple times
+        if LoggingService._initialized:
+            return
+        
         # Create logs directory if it doesn't exist
         self.log_dir = os.path.join(os.getcwd(), "logs")
         os.makedirs(self.log_dir, exist_ok=True)
 
         # Set up logger
         self.logger = self._setup_logger(log_level)
+        
+        # Mark as initialized
+        LoggingService._initialized = True
 
     def _setup_logger(self, log_level):
         """Configure and return a logger with file and console handlers"""
