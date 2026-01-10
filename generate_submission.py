@@ -1,18 +1,19 @@
 import argparse
 import os
 import torch
+import numpy as np
 import pandas as pd
 from pathlib import Path
-from torch.utils.data import DataLoader
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from tqdm import tqdm
 
-# Import các module của bạn
-from src.config import ModelConfig
+# Import model của bạn
 from src.model import LSViTForAction
-from src.dataset import TestDataset, test_collate_fn
+from src.config import ModelConfig
 
-# === DANH SÁCH 51 CLASS HMDB51 (Đã sort A-Z để khớp với Index của Model) ===
-# Lưu ý: Model học theo thứ tự thư mục alpha-b, nên list này phải chuẩn A-Z
+# === DANH SÁCH 51 CLASS HMDB51 ===
 HMDB51_CLASSES = [
     'brush_hair', 'cartwheel', 'catch', 'chew', 'clap', 
     'climb', 'climb_stairs', 'dive', 'draw_sword', 'dribble', 
@@ -26,96 +27,165 @@ HMDB51_CLASSES = [
     'sword_exercise', 'talk', 'throw', 'turn', 'walk', 'wave'
 ]
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Generate Kaggle Submission')
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to best_model.pth')
-    parser.add_argument('--test_dir', type=str, required=True, help='Path to test data folder (containing 0, 1, 2...)')
-    parser.add_argument('--output', type=str, default='submission.csv', help='Output CSV file path')
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--num_workers', type=int, default=2)
-    return parser.parse_args()
+class DenseTestDataset(Dataset):
+    """
+    Dataset đặc biệt cho Dense Sampling:
+    - Input: 1 Video folder
+    - Output: Tensor [Num_Clips, 3, T, H, W] (Thay vì [3, T, H, W])
+    """
+    def __init__(self, root, num_clips=10, num_frames=16, image_size=224):
+        self.root = Path(root)
+        self.num_clips = num_clips
+        self.num_frames = num_frames
+        
+        # Tìm tất cả folder video (0, 1, 2...)
+        self.video_folders = sorted([d for d in self.root.iterdir() if d.is_dir()])
+        
+        # Transform: Chỉ Resize và Normalize (Không crop, không flip để giữ nguyên gốc)
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    def __len__(self):
+        return len(self.video_folders)
+
+    def _load_clip(self, frame_paths, start_idx):
+        """Load 1 clip gồm num_frames bắt đầu từ start_idx"""
+        frames = []
+        total = len(frame_paths)
+        
+        for i in range(self.num_frames):
+            # Lấy frame tiếp theo, nếu hết video thì lấy frame cuối cùng (padding)
+            idx = min(start_idx + i, total - 1) 
+            path = frame_paths[idx]
+            
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                frames.append(self.transform(img))
+                
+        return torch.stack(frames) # [num_frames, 3, H, W] -> cần permute sau
+
+    def __getitem__(self, idx):
+        video_dir = self.video_folders[idx]
+        video_id = video_dir.name
+        
+        # Lấy danh sách ảnh trong folder
+        frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {".jpg", ".png"}])
+        total_frames = len(frame_paths)
+        
+        if total_frames == 0:
+            # Xử lý trường hợp folder rỗng (trả về tensor 0)
+            return torch.zeros(self.num_clips, 3, self.num_frames, 224, 224), video_id
+
+        # === LOGIC DENSE SAMPLING ===
+        # Chọn 10 điểm bắt đầu rải đều từ đầu đến (cuối - độ dài clip)
+        # Ví dụ: Video 100 frames, clip 16 frame -> max start = 84
+        max_start = max(0, total_frames - self.num_frames)
+        start_indices = np.linspace(0, max_start, self.num_clips, dtype=int)
+        
+        clips = []
+        for start_idx in start_indices:
+            clip = self._load_clip(frame_paths, start_idx) # [T, 3, H, W]
+            clip = clip.permute(1, 0, 2, 3) # Đổi thành [3, T, H, W] cho đúng model
+            clips.append(clip)
+            
+        # Stack lại: [Num_Clips, 3, T, H, W]
+        dense_tensor = torch.stack(clips)
+        
+        return dense_tensor, video_id
+
+def save_submission(ids, predictions, output_path):
+    df = pd.DataFrame({'id': ids, 'class': predictions})
+    
+    # Sort theo ID số
+    try:
+        df['id_num'] = df['id'].astype(int)
+        df = df.sort_values(by='id_num').drop(columns=['id_num'])
+    except:
+        df = df.sort_values(by='id')
+        
+    df.to_csv(output_path, index=False)
+    print(f"✅ Submission saved to: {output_path}")
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint', type=str, required=True)
+    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--num_clips', type=int, default=10, help='Số lượng clip cắt ra từ 1 video')
+    parser.add_argument('--batch_size', type=int, default=4, help='Lưu ý: Batch size nhỏ vì 1 sample = 10 clips')
+    parser.add_argument('--output', type=str, default='submission.csv')
+    args = parser.parse_args()
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # 1. Load Config & Model
-    print("Creating model...")
-    cfg = ModelConfig()
-    cfg.num_classes = 51 # HMDB51 luôn là 51
-    model = LSViTForAction(config=cfg).to(device)
-
-    # 2. Load Checkpoint (Xử lý các loại prefix module./_orig_mod.)
-    print(f"Loading weights from {args.checkpoint}...")
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    # 1. Load Model
+    print("Loading model...")
+    config = ModelConfig()
+    config.num_classes = 51
+    model = LSViTForAction(config=config).to(device)
     
-    # Nếu checkpoint lưu cả optimizer/epoch, chỉ lấy phần 'model' hoặc state_dict
-    if isinstance(checkpoint, dict) and 'model' in checkpoint:
-        state_dict = checkpoint['model'] # Trường hợp lưu kiểu dictionary
-    else:
-        state_dict = checkpoint # Trường hợp lưu trực tiếp state_dict
-        
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+    
     # Clean keys
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        clean_k = k
-        if clean_k.startswith('module.'): clean_k = clean_k[7:]
-        if clean_k.startswith('_orig_mod.'): clean_k = clean_k[10:]
-        new_state_dict[clean_k] = v
-        
-    model.load_state_dict(new_state_dict)
+    new_state_dict = {k.replace('module.', '').replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    model.load_state_dict(new_state_dict, strict=False)
     model.eval()
 
-    # 3. Setup Test Dataset & Loader
-    print(f"Loading Test Data from {args.test_dir}...")
-    # Lưu ý: TestDataset của bạn đã return (video_tensor, video_id)
-    test_ds = TestDataset(
-        root=args.test_dir,
-        num_frames=cfg.num_frames,   # Mặc định lấy từ config (thường là 16)
-        frame_stride=cfg.frame_stride,
-        image_size=cfg.image_size
+    # 2. Dataset & Loader
+    print(f"Loading data from {args.data_root} with Dense Sampling ({args.num_clips} clips/video)...")
+    dataset = DenseTestDataset(
+        root=args.data_root, 
+        num_clips=args.num_clips,
+        num_frames=16 # Mặc định theo config train
     )
     
-    test_loader = DataLoader(
-        test_ds,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=test_collate_fn, # Hàm collate trả về video_ids
-        pin_memory=True
+    loader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=2
     )
-    print(f"Found {len(test_ds)} test videos.")
 
-    # 4. Inference Loop
-    results = [] # List chứa dict {'id': ..., 'class': ...}
-    
+    # 3. Inference Loop
+    all_preds = []
+    all_ids = []
+
     print("Running Inference...")
     with torch.no_grad():
-        for videos, video_ids in tqdm(test_loader):
-            videos = videos.to(device)
+        for videos, ids in tqdm(loader):
+            # videos shape: [Batch_Size, Num_Clips, 3, T, H, W]
+            # Ví dụ: [4, 10, 3, 16, 224, 224]
+            
+            b, n_clips, c, t, h, w = videos.shape
+            
+            # Gộp Batch và Num_Clips lại để đưa vào model (Model chỉ nhận 4D batch)
+            # Input thành: [40, 3, 16, 224, 224]
+            inputs = videos.view(-1, c, t, h, w).to(device)
             
             # Forward
-            logits = model(videos)
-            preds = logits.argmax(dim=1).cpu().numpy()
-            video_ids = video_ids.numpy()
+            logits = model(inputs) # Kết quả: [40, 51]
             
-            # Map Index -> Class Name
-            for vid_id, pred_idx in zip(video_ids, preds):
-                class_name = HMDB51_CLASSES[pred_idx]
-                results.append({'id': vid_id, 'class': class_name})
+            # Tách lại Batch và Clips
+            # [4, 10, 51]
+            logits = logits.view(b, n_clips, -1)
+            
+            # === CHÌA KHÓA: LẤY TRUNG BÌNH CỘNG (MEAN) ===
+            # Trung bình cộng điểm số của 10 clips
+            mean_logits = logits.mean(dim=1) # [4, 51]
+            
+            # Lấy nhãn max
+            preds = mean_logits.argmax(dim=1).cpu().numpy()
+            
+            all_preds.extend(preds)
+            all_ids.extend(ids)
 
-    # 5. Create DataFrame & Save CSV
-    df = pd.DataFrame(results)
-    
-    # Sort theo ID để đẹp đội hình (0, 1, 2...)
-    df = df.sort_values(by='id').reset_index(drop=True)
-    
-    # Lưu file
-    df.to_csv(args.output, index=False)
-    print(f"\n✅ Submission file created successfully: {args.output}")
-    print("Example rows:")
-    print(df.head())
+    # 4. Map to Names & Save
+    final_names = [HMDB51_CLASSES[p] if p < 51 else "unknown" for p in all_preds]
+    save_submission(all_ids, final_names, args.output)
 
 if __name__ == "__main__":
     main()
