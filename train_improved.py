@@ -180,8 +180,7 @@ def get_scheduler(optimizer, args, t_cfg, steps_per_epoch):
             optimizer,
             mode='max',
             factor=0.5,
-            patience=3,
-            verbose=True
+            patience=3
         )
         print(f"📈 Using ReduceLROnPlateau scheduler (patience=3)")
     
