@@ -22,7 +22,7 @@ def ensure_dir(path: str):
         Path(path).mkdir(parents=True, exist_ok=True)
 
 def load_vit_checkpoint(backbone, pretrained_name: str, weights_dir: str):
-    """Tự động tải và load weights pretrained từ timm"""
+   
     ensure_dir(weights_dir)
     auto_path = Path(weights_dir) / f"{pretrained_name}_timm.pth"
 
@@ -34,17 +34,42 @@ def load_vit_checkpoint(backbone, pretrained_name: str, weights_dir: str):
         state = pretrained_model.state_dict()
         torch.save(state, auto_path)
 
-    # Lọc bỏ phần head để load vào backbone
+    
+    model_state = backbone.state_dict()
+    
     filtered_state = {}
     for k, v in state.items():
         if k.startswith("head"):
             continue
+        
         key = k
-        # Xử lý prefix nếu cần
         for prefix in ("module.", "backbone."):
             if key.startswith(prefix):
                 key = key[len(prefix):]
-        filtered_state[key] = v
+        
+        # Logic ghép weight
+        if key in model_state:
+            target_shape = model_state[key].shape
+            loaded_shape = v.shape
+            
+            if len(target_shape) == 5 and len(loaded_shape) == 4:
+                print(f"Inflating weight '{key}': {loaded_shape} -> {target_shape}")
+                
+                # 1. Thêm chiều thời gian vào vị trí index 2: [Out, In, 1, H, W]
+                v = v.unsqueeze(2)
+                
+                # 2. Lặp lại weight theo kích thước thời gian (tubelet_size)
+                # target_shape[2] chính là tubelet_size (ví dụ = 2)
+                repeat_times = target_shape[2]
+                v = v.repeat(1, 1, repeat_times, 1, 1)
+                
+                # 3. Chia tỉ lệ (Scale) để giữ nguyên variance của output
+                # Đây là kỹ thuật chuẩn khi inflate weights (I3D paper)
+                v = v / repeat_times
+                
+            filtered_state[key] = v
+        else:
+            filtered_state[key] = v
 
     missing, unexpected = backbone.load_state_dict(filtered_state, strict=False)
     print(f"Loaded pretrained weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
