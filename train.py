@@ -218,18 +218,16 @@ def main():
     if args.resume:
         print("Note: Resuming process. Previous best accuracy is unknown here, but model will save if current val acc is high.")
 
-    print(f"\nStart Training for {t_cfg.epochs} epochs...")
+    print(f"\nStart Training for {t_cfg.epochs} epochs (FULL DATA MODE)...")
+    
     for epoch in range(t_cfg.epochs):
         
-        # === FREEZE LOGIC ===
+        # Logic Freeze/Unfreeze (Giữ nguyên)
         if args.resume:
-            # Khi resume (thường là fine-tune tiếp), ta luôn UNFREEZE backbone
             real_model = model.module if hasattr(model, 'module') else model
             for param in real_model.backbone.parameters():
                 param.requires_grad = True
-            if epoch == 0: print("Backbone UN-FROZEN (Resume Mode)")
         else:
-            # Logic cũ: Freeze 3 epoch đầu
             real_model = model.module if hasattr(model, 'module') else model
             if epoch < 3:
                 for param in real_model.backbone.parameters(): param.requires_grad = False
@@ -239,25 +237,36 @@ def main():
                 print("Backbone UN-FROZEN")
             
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, device, mixup_fn=mixup_fn, criterion=train_criterion)
+        
+        # 1. Chỉ chạy Train (Không cần chạy Val nữa để tiết kiệm thời gian)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, scaler, device, 
+            mixup_fn=mixup_fn, criterion=train_criterion
+        )
         
         scheduler.step()
-        
-        val_acc, val_loss = evaluate(model, val_loader, device, criterion=val_criterion)
-        
         current_lr = scheduler.get_last_lr()[-1]
-        print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | LR: {current_lr:.6f}")
-        print(f"Val Loss: {val_loss:.4f}   | Acc: {val_acc:.4f}")
         
-        # Save model
-        if val_acc > best_acc:
-            best_acc = val_acc
-            model_to_save = model.module if hasattr(model, 'module') else model
-            # Lưu tên khác một chút để phân biệt
-            suffix = "_resumed" if args.resume else ""
-            checkpoint_path = f"{args.checkpoint_dir}/best_model{suffix}.pth"
-            torch.save(model_to_save.state_dict(), checkpoint_path)
-            print(f"New best model saved! ({best_acc:.4f}) -> {checkpoint_path}")
+        # In kết quả Train
+        print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | LR: {current_lr:.6f}")
+        
+        # 2. LƯU MODEL: Luôn lưu model sau mỗi epoch (ghi đè lên file last_model.pth)
+        # Vì ta train full data, nên epoch cuối cùng thường là epoch tốt nhất.
+        model_to_save = model.module if hasattr(model, 'module') else model
+        
+        # Lưu file 'last_model.pth' (Model mới nhất)
+        last_checkpoint_path = f"{args.checkpoint_dir}/last_model_fulldata.pth"
+        torch.save(model_to_save.state_dict(), last_checkpoint_path)
+        print(f"--> Saved checkpoint: {last_checkpoint_path}")
+
+        # (Tùy chọn) Vẫn lưu best model dựa trên Train Acc để tham khảo
+        if train_acc > best_acc:
+            best_acc = train_acc
+            best_path = f"{args.checkpoint_dir}/best_train_acc_model.pth"
+            torch.save(model_to_save.state_dict(), best_path)
+            print(f"--> New Best Train Acc! ({best_acc:.4f})")
+
+    print(f"\nTraining complete! Final model saved at: {last_checkpoint_path}")
 
 if __name__ == "__main__":
     main()
