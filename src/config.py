@@ -40,7 +40,7 @@ class TrainingConfig:
     data_root: str = field(default_factory=lambda: os.getenv('APPCONFIG__DATA_ROOT') or _get_default_data_root())
     weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR') or _get_default_weights_dir())
     pretrained_name: str = os.getenv('APPCONFIG__PRETRAINED_NAME', 'vit_base_patch16_224')
-    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 24))  # Trên Mac có thể cần giảm batch size nếu RAM ít
+    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 32))  # Trên Mac có thể cần giảm batch size nếu RAM ít
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
     frame_stride: int = int(os.getenv('APPCONFIG__FRAME_STRIDE', 2))
     lr: float = float(os.getenv('APPCONFIG__LR', 3e-4))

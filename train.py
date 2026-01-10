@@ -83,7 +83,8 @@ def main():
 
     train_loader = DataLoader(
         train_ds, batch_size=t_cfg.batch_size, shuffle=True,
-        num_workers=t_cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+        num_workers=t_cfg.num_workers, pin_memory=True, collate_fn=collate_fn,
+        drop_last=True  
     )
     val_loader = DataLoader(
         val_ds, batch_size=t_cfg.batch_size, shuffle=False,
