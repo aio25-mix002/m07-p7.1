@@ -38,14 +38,14 @@ class TrainingConfig:
     weights_dir: str = field(default_factory=lambda: os.getenv('APPCONFIG__WEIGHTS_DIR') or _get_default_weights_dir())
     pretrained_name: str = os.getenv('APPCONFIG__PRETRAINED_NAME', 'vit_base_patch16_224.augreg_in21k')
     
-    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 30))
+    batch_size: int = int(os.getenv('APPCONFIG__BATCH_SIZE', 32))
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
     frame_stride: int = int(os.getenv('APPCONFIG__FRAME_STRIDE', 2))
-    lr: float = float(os.getenv('APPCONFIG__LR', 2e-4))
+    lr: float = float(os.getenv('APPCONFIG__LR', 1e-4))
     epochs: int = int(os.getenv('APPCONFIG__EPOCHS', 15)) 
     val_ratio: float = float(os.getenv('APPCONFIG__VAL_RATIO', 0.1))
     seed: int = int(os.getenv('APPCONFIG__SEED', 42))
-    num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 8))
+    num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 4))
     
     # MIXUP
     mixup_alpha: float = float(os.getenv('APPCONFIG__MIXUP_ALPHA', 0.8))
