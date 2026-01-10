@@ -27,35 +27,49 @@ def parse_args():
     return parser.parse_args()
 
 def build_optimizer_params(model, base_lr, weight_decay, layer_decay=0.75):
-    """
-    Phân chia tham số để áp dụng Layer-wise Learning Rate Decay.
-    LR sẽ giảm dần từ lớp cuối về lớp đầu theo tỷ lệ layer_decay.
-    """
+
     param_groups = {}
-    
-    num_layers = len(model.backbone.blocks) + 1 
+    if hasattr(model, 'module'):
+        real_model = model.module
+    elif hasattr(model, '_orig_mod'): 
+        real_model = model._orig_mod
+    else:
+        real_model = model
+
+
+    num_layers = len(real_model.backbone.blocks) + 1 
     scales = list(layer_decay ** i for i in reversed(range(num_layers)))
     
+   
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+        
+        # Xử lý tên biến: Loại bỏ prefix 'module.' hoặc '_orig_mod.' để logic phân loại hoạt động đúng
+        clean_name = name
+        if clean_name.startswith("module."):
+            clean_name = clean_name[7:]
+        if clean_name.startswith("_orig_mod."):
+            clean_name = clean_name[10:]
             
-        # 1. Xác định layer id
-        if name.startswith("backbone.cls_token") or name.startswith("backbone.pos_embed") or name.startswith("backbone.patch_embed"):
+        # Phân loại layer id dựa trên clean_name
+        if clean_name.startswith("backbone.cls_token") or \
+           clean_name.startswith("backbone.pos_embed") or \
+           clean_name.startswith("backbone.patch_embed"):
             layer_id = 0
-        elif name.startswith("backbone.blocks"):
-            # Lấy index của block: backbone.blocks.0. ... -> id = 1
+        elif clean_name.startswith("backbone.blocks"):
+            # Lấy index của block: backbone.blocks.0... -> id = 1
             try:
-                layer_id = int(name.split('.')[2]) + 1
+                # clean_name dạng: backbone.blocks.0.norm1.weight
+                layer_id = int(clean_name.split('.')[2]) + 1
             except:
                 layer_id = num_layers - 1
         else:
             # Head và các module khác (SMIF, LMI) nhận LR lớn nhất
             layer_id = num_layers - 1
             
-        # 2. Xác định group key (có weight decay hay không)
-        # Không áp dụng weight decay cho bias và norm layers
-        if param.ndim == 1 or name.endswith(".bias"):
+        # Xác định group key (có weight decay hay không)
+        if param.ndim == 1 or clean_name.endswith(".bias"):
             group_name = f"no_decay_layer_{layer_id}"
             this_decay = 0.0
         else:
