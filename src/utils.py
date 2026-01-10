@@ -48,6 +48,16 @@ def load_vit_checkpoint(backbone, pretrained_name: str, weights_dir: str):
         for prefix in ("module.", "backbone."):
             if key.startswith(prefix):
                 key = key[len(prefix) :]
+        
+        # Handle patch_embed weight conversion from 2D to 3D
+        if key == "patch_embed.proj.weight" and v.dim() == 4:
+            # Original shape: [out_channels, in_channels, H, W]
+            # Target shape: [out_channels, in_channels, T, H, W]
+            # Inflate by repeating along temporal dimension and dividing by T
+            tubelet_size = 2  # Match config.tubelet_size
+            v = v.unsqueeze(2).repeat(1, 1, tubelet_size, 1, 1) / tubelet_size
+            print(f"Inflated patch_embed.proj.weight from 2D to 3D: {state[k].shape} -> {v.shape}")
+        
         filtered_state[key] = v
 
     missing, unexpected = backbone.load_state_dict(filtered_state, strict=False)
