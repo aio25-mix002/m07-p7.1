@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 import os
 import torch
-
+from torchvision import transforms
 @dataclass
 class ModelConfig:
     image_size: int = int(os.getenv('APPCONFIG__IMAGE_SIZE', 224))
@@ -42,20 +42,17 @@ class TrainingConfig:
     num_frames: int = int(os.getenv('APPCONFIG__NUM_FRAMES', 16))
     frame_stride: int = int(os.getenv('APPCONFIG__FRAME_STRIDE', 2))
     lr: float = float(os.getenv('APPCONFIG__LR', 1e-4))
-    epochs: int = int(os.getenv('APPCONFIG__EPOCHS', 15)) 
+    epochs: int = int(os.getenv('APPCONFIG__EPOCHS', 25)) 
     val_ratio: float = float(os.getenv('APPCONFIG__VAL_RATIO', 0.1))
     seed: int = int(os.getenv('APPCONFIG__SEED', 42))
     num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 4))
     
     # MIXUP
-    mixup_alpha: float = float(os.getenv('APPCONFIG__MIXUP_ALPHA', 0.8))
-    cutmix_alpha: float = float(os.getenv('APPCONFIG__CUTMIX_ALPHA', 1.0))
-    mixup_prob: float = float(os.getenv('APPCONFIG__MIXUP_PROB', 1.0))
-    mixup_switch_prob: float = 0.5
-    mixup_mode: str = 'batch'
-    
-    # === LABEL SMOOTHING ===
-    label_smoothing: float = float(os.getenv('APPCONFIG__LABEL_SMOOTHING', 0.1))
+    mixup_alpha: float = 0.0      # Cũ: 0.8 -> Tắt (0.0)
+    cutmix_alpha: float = 0.0     # Cũ: 1.0 -> Tắt (0.0)
+    mixup_prob: float = 0.0       # Cũ: 1.0 -> Tắt (0.0)
+    mixup_switch_prob: float = 0.0
+    label_smoothing: float = 0.0
     @property
     def device(self) -> str:
         if torch.backends.mps.is_available():

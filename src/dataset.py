@@ -10,6 +10,9 @@ from torchvision.transforms import InterpolationMode, RandomErasing
 from PIL import Image
 import numpy as np
 from torchvision.transforms import RandAugment
+from torchvision import transforms
+
+
 
 class VideoTransform:
     def __init__(self, image_size: int, is_train: bool = True):
@@ -91,20 +94,17 @@ class HMDB51Dataset(Dataset):
         self.classes = sorted([d.name for d in self.root.iterdir() if d.is_dir()])
         self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
         
-        # Group frames by video
+        # --- (Giữ nguyên logic load path và split train/val của bạn) ---
         grouped_samples = {}
         for cls in self.classes:
             cls_dir = self.root / cls
             for video_dir in sorted([d for d in cls_dir.iterdir() if d.is_dir()]):
                 frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {".jpg", ".png"}])
                 if not frame_paths: continue
-                
-                # Extract base name to handle potential splits/clips
                 base_name = self._base_video_name(video_dir.name)
                 group_key = (cls, base_name)
                 grouped_samples.setdefault(group_key, []).append((frame_paths, self.class_to_idx[cls]))
 
-        # Train/Val split
         group_values = list(grouped_samples.values())
         rng = np.random.RandomState(seed)
         group_indices = np.arange(len(group_values))
@@ -123,58 +123,66 @@ class HMDB51Dataset(Dataset):
         self.split = split
         self.num_frames = num_frames
         self.frame_stride = max(1, frame_stride)
-        self.transform = VideoTransform(image_size, is_train=(split == "train"))
+        
+        # === PHẦN CHỈNH SỬA QUAN TRỌNG NHẤT (AUGMENTATION COOLDOWN) ===
+        # Thay vì dùng VideoTransform phức tạp, ta dùng torchvision thuần.
+        # Mục tiêu: Đưa dữ liệu về dạng "sạch" nhất (Resize + Normalize) để Fine-tune.
+        
         self.to_tensor = transforms.ToTensor()
+        
+        # Cấu hình Normalize chuẩn ImageNet
+        norm_mean = [0.485, 0.456, 0.406]
+        norm_std = [0.229, 0.224, 0.225]
+
+        if split == "train":
+            # Giai đoạn Cooldown: Bỏ RandomCrop, Bỏ RandomRotation.
+            # Chỉ Resize về đúng kích thước và Normalize.
+            self.transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)), 
+                transforms.Normalize(mean=norm_mean, std=norm_std)
+            ])
+        else:
+            # Validation: Giữ nguyên như cũ (Resize + Normalize)
+            self.transform = transforms.Compose([
+                transforms.Resize((image_size, image_size)),
+                transforms.Normalize(mean=norm_mean, std=norm_std)
+            ])
+            
+        # Lưu ý: Tại sao không dùng RandomHorizontalFlip ở đây? 
+        # Vì nếu áp dụng từng frame, video sẽ bị nhấp nháy (frame lật, frame không).
+        # Tốt nhất giai đoạn cuối nên bỏ qua để dữ liệu ổn định.
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def _select_indices(self, total_frames: int) -> torch.Tensor:
-        """
-        TSN-style Sampling:
-        - Chia video thành K segments (K = self.num_frames).
-        - Train: Lấy ngẫu nhiên 1 frame từ mỗi segment.
-        - Val/Test: Lấy frame ở giữa mỗi segment.
-        """
+        # --- (Giữ nguyên logic Sampling của bạn) ---
         if total_frames <= 0:
             return torch.zeros(self.num_frames, dtype=torch.long)
-
-        # Nếu video ngắn hơn số frame cần lấy -> Padding bằng cách lặp lại index cuối
         if total_frames < self.num_frames:
-            # Basic uniform sampling for short videos
             idxs = torch.arange(total_frames)
             pad = idxs.new_full((self.num_frames - total_frames,), idxs[-1].item())
             return torch.cat([idxs, pad], dim=0)
-
-        # Chia thành các segments
-        segments = np.linspace(0, total_frames, self.num_frames + 1)
         
+        segments = np.linspace(0, total_frames, self.num_frames + 1)
         indices = []
         for i in range(self.num_frames):
             start, end = int(segments[i]), int(segments[i+1])
-            
-            # Tránh trường hợp start == end do làm tròn
-            if start == end:
-                end = start + 1
-            
+            if start == end: end = start + 1
             if self.split == 'train':
-                # Random sample trong segment (Data Augmentation temporallly)
                 idx = np.random.randint(start, end)
             else:
-                # Center sample trong segment (Deterministic)
                 idx = (start + end) // 2
-                
-            # Clamp index cho an toàn
             idx = min(max(0, idx), total_frames - 1)
             indices.append(idx)
-            
         return torch.tensor(indices, dtype=torch.long)
+
     @staticmethod
     def _base_video_name(name: str) -> str:
         match = re.match(r"(.+)_\\d+$", name)
         return match.group(1) if match else name
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int):
         frame_paths, label = self.samples[idx]
         total = len(frame_paths)
         idxs = self._select_indices(total)
@@ -184,12 +192,22 @@ class HMDB51Dataset(Dataset):
             path = frame_paths[int(i.item())]
             with Image.open(path) as img:
                 img = img.convert("RGB")
-                frames.append(self.to_tensor(img))
+                
+                # 1. Chuyển sang Tensor [C, H, W]
+                tensor_img = self.to_tensor(img)
+                
+                # 2. Áp dụng Transform ngay trên từng frame
+                # (Để tránh lỗi dimension khi stack thành video)
+                transformed_img = self.transform(tensor_img)
+                
+                frames.append(transformed_img)
         
-        video = torch.stack(frames)
-        video = self.transform(video)
+        # 3. Stack lại thành video [T, C, H, W]
+        video = torch.stack(frames) 
+        
+        # Lưu ý: Không gọi self.transform(video) ở đây nữa vì đã làm trong vòng lặp rồi
+        
         return video, label
-
 class TestDataset(Dataset):
     """Dataset for test data without labels (Kaggle competition format)."""
 
