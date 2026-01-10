@@ -47,7 +47,7 @@ class TrainingConfig:
     epochs: int = int(os.getenv('APPCONFIG__EPOCHS', 10))
     val_ratio: float = float(os.getenv('APPCONFIG__VAL_RATIO', 0.1))
     seed: int = int(os.getenv('APPCONFIG__SEED', 42))
-    num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 4))  # Mac thường tối ưu tốt hơn với num_workers thấp hơn (0 hoặc 2)
+    num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 8))  # Mac thường tối ưu tốt hơn với num_workers thấp hơn (0 hoặc 2)
     # MIXUP
     mixup_alpha: float = float(os.getenv('APPCONFIG__MIXUP_ALPHA', 0.8))
     cutmix_alpha: float = float(os.getenv('APPCONFIG__CUTMIX_ALPHA', 1.0))
