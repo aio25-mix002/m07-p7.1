@@ -24,8 +24,10 @@ def parse_args():
     parser.add_argument('--val_ratio', type=float, default=None, help='Validation split ratio')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Directory to save checkpoints')
-    # THÊM THAM SỐ RESUME
+    
+    # === THÊM THAM SỐ RESUME ===
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training')
+    
     return parser.parse_args()
 
 def build_optimizer_params(model, base_lr, weight_decay, layer_decay=0.75):
@@ -144,20 +146,24 @@ def main():
         print(f"--> RESUMING TRAINING from: {args.resume}")
         checkpoint = torch.load(args.resume, map_location='cpu')
         
-        # Xử lý key module.
+        # Xử lý key module. hoặc _orig_mod.
         state_dict = checkpoint
+        # Nếu checkpoint lưu dict bao gồm optimizer, epoch... thì chỉ lấy phần model
+        if isinstance(state_dict, dict) and 'model' in state_dict:
+            state_dict = state_dict['model']
+
         new_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith('module.'):
-                new_state_dict[k[7:]] = v
-            else:
-                new_state_dict[k] = v
+            clean_k = k
+            if clean_k.startswith('module.'): clean_k = clean_k[7:]
+            if clean_k.startswith('_orig_mod.'): clean_k = clean_k[10:]
+            new_state_dict[clean_k] = v
                 
-        # Load weights
-        model.load_state_dict(new_state_dict, strict=False)
-        print("--> Weights loaded successfully!")
+        # Load weights (strict=False để an toàn nếu có sự khác biệt nhỏ về key tên)
+        missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+        print(f"--> Weights loaded! Missing: {len(missing)}, Unexpected: {len(unexpected)}")
     else:
-        # Load pre-trained ImageNet gốc
+        # Load pre-trained ImageNet gốc như bình thường
         load_vit_checkpoint(model.backbone, t_cfg.pretrained_name, t_cfg.weights_dir)
         
     model = model.to(device)
@@ -176,12 +182,13 @@ def main():
     params = build_optimizer_params(model, base_lr=t_cfg.lr, weight_decay=0.05, layer_decay=0.75)
     optimizer = torch.optim.AdamW(params, lr=t_cfg.lr)
 
-    # Scheduler: Nếu resume thì không cần warmup dài, chỉ cần Cosine Decay
+    # === SCHEDULER LOGIC ===
     if args.resume:
-        print("Scheduler: Resume mode (Cosine Annealing only)")
+        # Nếu Resume: Bỏ qua Warmup, dùng Cosine Decay ngay lập tức (thích hợp cho Fine-tuning tiếp)
+        print("Scheduler: Resume mode (Cosine Annealing only - No Warmup)")
         scheduler = CosineAnnealingLR(optimizer, T_max=t_cfg.epochs, eta_min=1e-7)
     else:
-        # Chế độ train từ đầu: Có warmup
+        # Nếu Train mới: Có Warmup 5 epoch
         warmup_epochs = 5
         warmup_scheduler = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
         main_scheduler = CosineAnnealingLR(optimizer, T_max=t_cfg.epochs - warmup_epochs, eta_min=1e-6)
@@ -208,20 +215,21 @@ def main():
     ensure_dir(args.checkpoint_dir)
     best_acc = 0.0
     
-    # Nếu resume, ta giả định best_acc cũ (để in ra cho đẹp, không ảnh hưởng logic lưu mới)
     if args.resume:
         print("Note: Resuming process. Previous best accuracy is unknown here, but model will save if current val acc is high.")
 
     print(f"\nStart Training for {t_cfg.epochs} epochs...")
     for epoch in range(t_cfg.epochs):
-        # Khi resume, ta luôn UNFREEZE backbone
+        
+        # === FREEZE LOGIC ===
         if args.resume:
-             # Unfreeze toàn bộ
+            # Khi resume (thường là fine-tune tiếp), ta luôn UNFREEZE backbone
             real_model = model.module if hasattr(model, 'module') else model
             for param in real_model.backbone.parameters():
                 param.requires_grad = True
+            if epoch == 0: print("Backbone UN-FROZEN (Resume Mode)")
         else:
-            # Logic cũ
+            # Logic cũ: Freeze 3 epoch đầu
             real_model = model.module if hasattr(model, 'module') else model
             if epoch < 3:
                 for param in real_model.backbone.parameters(): param.requires_grad = False
@@ -232,7 +240,9 @@ def main():
             
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, device, mixup_fn=mixup_fn, criterion=train_criterion)
+        
         scheduler.step()
+        
         val_acc, val_loss = evaluate(model, val_loader, device, criterion=val_criterion)
         
         current_lr = scheduler.get_last_lr()[-1]
@@ -243,9 +253,11 @@ def main():
         if val_acc > best_acc:
             best_acc = val_acc
             model_to_save = model.module if hasattr(model, 'module') else model
-            checkpoint_path = f"{args.checkpoint_dir}/best_model_resumed.pth"
+            # Lưu tên khác một chút để phân biệt
+            suffix = "_resumed" if args.resume else ""
+            checkpoint_path = f"{args.checkpoint_dir}/best_model{suffix}.pth"
             torch.save(model_to_save.state_dict(), checkpoint_path)
-            print(f"New best model saved! ({best_acc:.4f})")
+            print(f"New best model saved! ({best_acc:.4f}) -> {checkpoint_path}")
 
 if __name__ == "__main__":
     main()
