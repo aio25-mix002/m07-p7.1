@@ -106,7 +106,8 @@ class HMDB51Dataset(Dataset):
 
     @staticmethod
     def _base_video_name(name: str) -> str:
-        match = re.match(r"(.+)_\\d+$", name)
+        # Loại bỏ phần suffix nếu có dạng _1, _2, ...
+        match = re.match(r"(.+)_\d+$", name)
         return match.group(1) if match else name
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
