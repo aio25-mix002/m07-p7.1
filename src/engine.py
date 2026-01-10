@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch.amp import autocast
 
-def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1):
+def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1, mixup_fn=None, criterion=None):
     model.train()
     total_loss = 0.0
     correct = 0
@@ -23,16 +23,32 @@ def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1
     for batch_idx, (videos, labels) in enumerate(progress):
         videos, labels = videos.to(device), labels.to(device)
         
+        # APPLY MIXUP ===
+        if mixup_fn is not None:
+            # Mixup input và transform label thành soft target
+            videos, labels = mixup_fn(videos, labels)
+        
         with torch.amp.autocast(device_type=device_type, enabled=use_amp):
             logits = model(videos)
-            loss = F.cross_entropy(logits, labels)
+            # Dùng criterion được truyền vào (SoftTargetCrossEntropy nếu có mixup)
+            if criterion is not None:
+                loss = criterion(logits, labels)
+            else:
+                loss = F.cross_entropy(logits, labels)
 
-        preds = logits.argmax(dim=1)
-        correct += (preds == labels).sum().item()
-        total += labels.size(0)
+        # Tính accuracy (chỉ mang tính tham khảo khi dùng Mixup vì label đã bị trộn)
+        # Nếu dùng mixup, ta lấy argmax của prediction so với argmax của soft label
+        if mixup_fn is not None:
+            preds = logits.argmax(dim=1)
+            gt_labels = labels.argmax(dim=1) # Lấy lại hard label từ soft label
+            correct += (preds == gt_labels).sum().item()
+        else:
+            preds = logits.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            
+        total += videos.size(0)
 
         loss = loss / grad_accum_steps
-        
         # Xử lý Scaler
         if use_amp and scaler is not None:
             scaler.scale(loss).backward()
@@ -41,7 +57,6 @@ def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1
                 scaler.update()
                 optimizer.zero_grad()
         else:
-            # Nếu không dùng AMP (ví dụ CPU hoặc MPS tắt AMP), chạy backward thường
             loss.backward()
             if ((batch_idx + 1) % grad_accum_steps == 0) or (batch_idx + 1 == num_batches):
                 optimizer.step()
@@ -54,7 +69,7 @@ def train_one_epoch(model, loader, optimizer, scaler, device, grad_accum_steps=1
 
     return total_loss / total, correct / total
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, criterion=None):
     model.eval()
     correct = 0
     total = 0
@@ -64,7 +79,12 @@ def evaluate(model, loader, device):
         for videos, labels in tqdm(loader, desc="Val", leave=False):
             videos, labels = videos.to(device), labels.to(device)
             logits = model(videos)
-            loss = F.cross_entropy(logits, labels)
+            
+            # Criterion cho val thường là CrossEntropy chuẩn
+            if criterion is not None:
+                loss = criterion(logits, labels)
+            else:
+                loss = F.cross_entropy(logits, labels)
             
             preds = logits.argmax(dim=1)
             correct += (preds == labels).sum().item()

@@ -84,6 +84,7 @@ class HMDB51Dataset(Dataset):
         for idx in selected_groups:
             self.samples.extend(group_values[int(idx)])
 
+        self.split = split
         self.num_frames = num_frames
         self.frame_stride = max(1, frame_stride)
         self.transform = VideoTransform(image_size, is_train=(split == "train"))
@@ -92,17 +93,46 @@ class HMDB51Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _select_indices(self, total: int) -> torch.Tensor:
-        if total == 1:
+    def _select_indices(self, total_frames: int) -> torch.Tensor:
+        """
+        TSN-style Sampling:
+        - Chia video thành K segments (K = self.num_frames).
+        - Train: Lấy ngẫu nhiên 1 frame từ mỗi segment.
+        - Val/Test: Lấy frame ở giữa mỗi segment.
+        """
+        if total_frames <= 0:
             return torch.zeros(self.num_frames, dtype=torch.long)
-        steps = max(self.num_frames * self.frame_stride, self.num_frames)
-        grid = torch.linspace(0, total - 1, steps=steps)
-        idxs = grid[:: self.frame_stride].long()
-        if idxs.numel() < self.num_frames:
-            pad = idxs.new_full((self.num_frames - idxs.numel(),), idxs[-1].item())
-            idxs = torch.cat([idxs, pad], dim=0)
-        return idxs[: self.num_frames]
 
+        # Nếu video ngắn hơn số frame cần lấy -> Padding bằng cách lặp lại index cuối
+        if total_frames < self.num_frames:
+            # Basic uniform sampling for short videos
+            idxs = torch.arange(total_frames)
+            pad = idxs.new_full((self.num_frames - total_frames,), idxs[-1].item())
+            return torch.cat([idxs, pad], dim=0)
+
+        # Chia thành các segments
+        segments = np.linspace(0, total_frames, self.num_frames + 1)
+        
+        indices = []
+        for i in range(self.num_frames):
+            start, end = int(segments[i]), int(segments[i+1])
+            
+            # Tránh trường hợp start == end do làm tròn
+            if start == end:
+                end = start + 1
+            
+            if self.split == 'train':
+                # Random sample trong segment (Data Augmentation temporallly)
+                idx = np.random.randint(start, end)
+            else:
+                # Center sample trong segment (Deterministic)
+                idx = (start + end) // 2
+                
+            # Clamp index cho an toàn
+            idx = min(max(0, idx), total_frames - 1)
+            indices.append(idx)
+            
+        return torch.tensor(indices, dtype=torch.long)
     @staticmethod
     def _base_video_name(name: str) -> str:
         match = re.match(r"(.+)_\\d+$", name)
@@ -160,16 +190,25 @@ class TestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def _select_indices(self, total: int) -> torch.Tensor:
-        if total == 1:
+    def _select_indices(self, total_frames: int) -> torch.Tensor:
+        # Sử dụng logic giống Validation (Center Sampling) cho Test
+        if total_frames <= 0:
             return torch.zeros(self.num_frames, dtype=torch.long)
-        steps = max(self.num_frames * self.frame_stride, self.num_frames)
-        grid = torch.linspace(0, total - 1, steps=steps)
-        idxs = grid[:: self.frame_stride].long()
-        if idxs.numel() < self.num_frames:
-            pad = idxs.new_full((self.num_frames - idxs.numel(),), idxs[-1].item())
-            idxs = torch.cat([idxs, pad], dim=0)
-        return idxs[: self.num_frames]
+
+        if total_frames < self.num_frames:
+            idxs = torch.arange(total_frames)
+            pad = idxs.new_full((self.num_frames - total_frames,), idxs[-1].item())
+            return torch.cat([idxs, pad], dim=0)
+
+        segments = np.linspace(0, total_frames, self.num_frames + 1)
+        indices = []
+        for i in range(self.num_frames):
+            start, end = int(segments[i]), int(segments[i+1])
+            idx = (start + end) // 2 # Luôn lấy giữa
+            idx = min(max(0, idx), total_frames - 1)
+            indices.append(idx)
+            
+        return torch.tensor(indices, dtype=torch.long)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         video_id, frame_paths = self.samples[idx]

@@ -9,6 +9,8 @@ from src.dataset import HMDB51Dataset, collate_fn
 from src.model import LSViTForAction
 from src.utils import set_seed, load_vit_checkpoint, ensure_dir
 from src.engine import train_one_epoch, evaluate
+from timm.data.mixup import Mixup
+from timm.loss import SoftTargetCrossEntropy
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train LS-ViT model for action recognition')
@@ -102,16 +104,43 @@ def main():
     
     # BƯỚC 3: Kích hoạt DataParallel nếu có > 1 GPU
     if torch.cuda.device_count() > 1 and device.type == 'cuda':
-        print(f"🔥 Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
+        print(f"Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
         model = nn.DataParallel(model)
     if os.name != 'nt' and torch.cuda.is_available():
-        print("🚀 Compiling model with torch.compile...")
+        print("Compiling model with torch.compile...")
         model = torch.compile(model)
     else:
         print("Chạy trên Single GPU.")
 
     # Training Setup
     optimizer = torch.optim.AdamW(model.parameters(), lr=t_cfg.lr)
+    
+    #  MIXUP
+    mixup_fn = None
+    mixup_active = t_cfg.mixup_alpha > 0 or t_cfg.cutmix_alpha > 0 or t_cfg.cutmix_minmax is not None
+    if mixup_active:
+        print("Data Augmentation: Enabled Mixup & CutMix!")
+        mixup_fn = Mixup(
+            mixup_alpha=t_cfg.mixup_alpha, 
+            cutmix_alpha=t_cfg.cutmix_alpha, 
+            prob=t_cfg.mixup_prob, 
+            switch_prob=t_cfg.mixup_switch_prob, 
+            mode=t_cfg.mixup_mode,
+            label_smoothing=t_cfg.label_smoothing, 
+            num_classes=m_cfg.num_classes
+        )
+        
+    # === LOSS FUNCTION ===
+    # Nếu dùng Mixup thì target không còn là index (int) mà là probability distribution (float)
+    # nên cần dùng SoftTargetCrossEntropy. Nếu train thường thì dùng LabelSmoothingCrossEntropy hoặc CE thường.
+    if mixup_fn is not None:
+        train_criterion = SoftTargetCrossEntropy()
+    else:
+        # Fallback nếu không dùng mixup nhưng vẫn muốn label smoothing
+        train_criterion = nn.CrossEntropyLoss(label_smoothing=t_cfg.label_smoothing)
+        
+    # Criterion cho validation luôn là CrossEntropy chuẩn (so sánh với hard label)
+    val_criterion = nn.CrossEntropyLoss()
     
     # Scaler cho Mixed Precision
     use_amp = (device.type == 'cuda') or (device.type == 'mps')
@@ -152,8 +181,11 @@ def main():
             set_freeze_status(model, freeze_backbone=False)
             
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
-        
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scaler, device)
+        # Truyền thêm mixup_fn và train_criterion vào hàm train
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, scaler, device, 
+            mixup_fn=mixup_fn, criterion=train_criterion
+        )
         val_acc, val_loss = evaluate(model, val_loader, device)
         
         print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
