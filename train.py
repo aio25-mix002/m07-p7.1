@@ -94,7 +94,8 @@ def main():
 
     # Create checkpoint directory with optional experiment name suffix
     checkpoint_dir = t_cfg.checkpoint_dir
-    checkpoint_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{t_cfg.expr_name if t_cfg.expr_name else ''}"
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_name = f"{timestamp}_{t_cfg.expr_name}" if t_cfg.expr_name else timestamp
     ensure_dir(checkpoint_dir)
 
     def set_freeze_status(model, freeze_backbone=True):

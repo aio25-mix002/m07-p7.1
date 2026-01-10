@@ -58,8 +58,10 @@ class TrainingConfig:
         self.seed: int = int(os.getenv('APPCONFIG__SEED', 42))
         self.num_workers: int = int(os.getenv('APPCONFIG__NUM_WORKERS', 4))
         self.checkpoint_dir: str = os.getenv('APPCONFIG__CHECKPOINT_DIR', './checkpoints')
-        self.patience: int = int(os.getenv('APPCONFIG__PATIENCE', 10))  
-        #self.log_dir: str = os.getenv('APPCONFIG__LOG_DIR', './logs')
+        self.patience: int = int(os.getenv('APPCONFIG__PATIENCE', 10))
+        # Note: log_dir is intentionally disabled for now; enable this line if/when
+        #       training-time logging to a dedicated directory is required.
+        # self.log_dir: str = os.getenv('APPCONFIG__LOG_DIR', './logs')
     
     # LOGIC CHỌN DEVICE: Ưu tiên MPS cho Mac -> CUDA -> CPU
     @property
