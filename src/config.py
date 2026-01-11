@@ -21,7 +21,7 @@ class ModelConfig:
 
 def _get_default_data_root() -> str:
     if os.path.exists('/kaggle'):
-        return '/kaggle/working/m07-p7.1/'
+        return '/kaggle/input/action-video/data/data_train'
     else:
         return './hmdb51_data'
 
