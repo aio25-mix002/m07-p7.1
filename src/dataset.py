@@ -3,12 +3,13 @@ import random
 import re
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, WeightedRandomSampler
 from torchvision import transforms
 import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 import numpy as np
+import cv2
 
 class VideoTransform:
     def __init__(self, image_size: int, is_train: bool = True):
@@ -41,7 +42,18 @@ class VideoTransform:
         else:
             frames = TF.resize(frames, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
 
-        normalized = [TF.normalize(frame, self.mean, self.std) for frame in frames]
+        if frames.shape == 3:
+            normalized = [TF.normalize(frame, self.mean, self.std) for frame in frames]
+        elif frames.shape == 4:
+            # Chuẩn hóa từng frame trong 1 tensor 4D [T, C, H, W]
+            # Chú ý: TF.normalize có thể nhận tensor 4D nếu version torchvision đủ mới, 
+            # nhưng an toàn nhất là làm thế này:
+            normalized = frames / 255.0 if frames.max() > 1.0 else frames
+            
+            # Biến đổi mean/std thành dạng [1, 3, 1, 1] để broadcast trừ cho [T, 3, H, W]
+            m = torch.tensor(self.mean).view(1, 3, 1, 1)
+            s = torch.tensor(self.std).view(1, 3, 1, 1)
+            normalized = (normalized - m) / s
         return torch.stack(normalized)
 
 class HMDB51Dataset(Dataset):
@@ -107,6 +119,7 @@ class HMDB51Dataset(Dataset):
     def _base_video_name(name: str) -> str:
         match = re.match(r"(.+)_\\d+$", name)
         return match.group(1) if match else name
+    
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         frame_paths, label = self.samples[idx]
@@ -197,3 +210,156 @@ def test_collate_fn(batch):
     videos = torch.stack([item[0] for item in batch])
     video_ids = torch.tensor([item[1] for item in batch], dtype=torch.long)
     return videos, video_ids
+
+class VideoDataset(Dataset):
+    def __init__(self, root,num_segments=4,clip_len=16, image_size=224, is_train=True):
+        self.root = Path(root)
+        self.num_segments = num_segments
+        self.clip_len = clip_len
+        self.is_train = is_train
+        self.transform = VideoTransform(image_size, is_train)
+        self.to_tensor = transforms.ToTensor()
+        self.classes = sorted([d.name for d in self.root.iterdir() if d.is_dir()])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+        self.samples = []
+        self.label_idx = []
+        for cls in self.classes:
+            cls_dir = self.root / cls
+            for video_dir in sorted([d for d in cls_dir.iterdir() if d.is_dir()]):
+                frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {'.jpg', '.jpeg', '.png'}])
+                if frame_paths:
+                    self.samples.append((frame_paths, self.class_to_idx[cls]))
+                    self.label_idx.append(self.class_to_idx[cls])
+                    
+    def __len__(self):
+        return len(self.samples)
+
+    def _tsn_sample(self, frames):
+        total = len(frames)
+        seg_size = total / self.num_segments
+        clips = []
+
+        for i in range(self.num_segments):
+            start = int(i * seg_size)
+            end = int((i + 1) * seg_size)
+            if self.is_train:
+                center = np.random.randint(start, max(start + 1, end))
+            else:
+                center = (start + end) // 2
+
+            idxs = np.linspace(
+                max(0, center - self.clip_len // 2),
+                min(total - 1, center + self.clip_len // 2),
+                self.clip_len
+            ).astype(int)
+
+            clips.append([frames[i] for i in idxs])
+
+        return clips
+
+    def __getitem__(self, idx):
+        frame_paths, label = self.samples[idx]
+
+        clips = self._tsn_sample(frame_paths)
+
+        processed_clips = []
+        for clip in clips:
+            # Đọc tất cả ảnh vào 1 mảng numpy duy nhất [T, H, W, C]
+            video_array = np.stack([cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB) for p in clip])
+            
+            # Chuyển sang Tensor [T, H, W, C]
+            video_tensor = torch.from_numpy(video_array).float()
+            video_tensor = video_tensor.permute(0, 3, 1, 2)
+            # Thực hiện Transform trên khối T-C-H-W
+            if self.transform:
+                video_tensor = self.transform(video_tensor)
+            
+            # Cuối cùng mới Permute sang chuẩn mô hình 3D: [C, T, H, W]
+            # Giả sử video_tensor lúc này là [T, H, W, C]
+            video_tensor = video_tensor.permute(1, 0, 2, 3)
+            processed_clips.append(video_tensor)
+
+        video = torch.stack(processed_clips, dim=0)
+        return video, label
+
+
+class TestTNSDataset(Dataset):
+    def __init__(self, root,num_segments=4,clip_len=16, image_size=224):
+        self.root = Path(root)
+        self.num_segments = num_segments
+        self.clip_len = clip_len
+        self.transform = VideoTransform(image_size, is_train=False)
+        self.to_tensor = transforms.ToTensor()
+        self.video_dirs = sorted([d for d in self.root.iterdir() if d.is_dir()], key=lambda x: int(x.name))
+        self.video_ids = [int(d.name) for d in self.video_dirs]
+    
+    def __len__(self):
+        return len(self.video_dirs)
+    
+    def _tsn_sample(self, frames):
+        total = len(frames)
+        seg_size = total / self.num_segments
+        clips = []
+
+        for i in range(self.num_segments):
+            start = int(i * seg_size)
+            end = int((i + 1) * seg_size)
+            center = (start + end) // 2
+
+            idxs = np.linspace(
+                max(0, center - self.clip_len // 2),
+                min(total - 1, center + self.clip_len // 2),
+                self.clip_len
+            ).astype(int)
+
+            clips.append([frames[i] for i in idxs])
+
+        return clips
+
+    def __getitem__(self, idx):
+        video_dir = self.video_dirs[idx]
+        video_id = self.video_ids[idx]
+        frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {'.jpg', '.jpeg', '.png'}])
+        total = len(frame_paths)
+
+        clips = self._tsn_sample(frame_paths)
+        processed_clips = []
+        for clip in clips:
+            # Đọc tất cả ảnh vào 1 mảng numpy duy nhất [T, H, W, C]
+            video_array = np.stack([cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB) for p in clip])
+            
+            # Chuyển sang Tensor [T, H, W, C]
+            video_tensor = torch.from_numpy(video_array).float()
+            video_tensor = video_tensor.permute(0, 3, 1, 2)
+            # Thực hiện Transform trên khối T-C-H-W
+            if self.transform:
+                video_tensor = self.transform(video_tensor)
+            
+            # Cuối cùng mới Permute sang chuẩn mô hình 3D: [C, T, H, W]
+            # Giả sử video_tensor lúc này là [T, H, W, C]
+            video_tensor = video_tensor.permute(1, 0, 2, 3)
+            processed_clips.append(video_tensor)
+
+        video = torch.stack(processed_clips, dim=0)
+        return video, video_id
+
+def create_balanced_sampler(dataset):
+    """Create balanced sampler for imbalanced dataset"""
+    if hasattr(dataset, 'dataset'):
+        all_labels = [dataset.dataset.label_idx[i] for i in dataset.indices]
+    else:
+        all_labels = dataset.label_idx
+
+    class_counts = np.bincount(all_labels)
+    class_weights = 1.0 / class_counts
+    sample_weights = [class_weights[label] for label in all_labels]
+    sample_weights = torch.FloatTensor(sample_weights)
+
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    print(f"Balanced Sampler: class counts min={class_counts.min()}, max={class_counts.max()}")
+    return sampler

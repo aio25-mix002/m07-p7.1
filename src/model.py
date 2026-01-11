@@ -232,3 +232,124 @@ class LSViTForAction(nn.Module):
         pooled = cls_tokens.mean(dim=1)
         logits = self.head(pooled)
         return logits
+    
+class X3DFeatureExtractor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = torch.hub.load(
+            "facebookresearch/pytorchvideo",
+            "x3d_s",
+            pretrained=True
+        )
+
+        # bỏ head hoàn toàn
+        self.head = self.model.blocks[-1]
+        self.blocks = self.model.blocks[:-1]
+
+    def forward(self, x):
+        # x: (B, C, T, H, W)
+        for block in self.blocks:
+            x = block(x)
+
+        # x lúc này là feature map 5D
+        # (B, C, T', H', W')
+        return x
+
+
+class SpatioTemporalTokenizer(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, B, N):
+        """
+        x: (B*N, C, H, W)   ← output thực tế của X3D
+        """
+        BN, C, H, W = x.shape
+        assert BN == B * N, "Batch mismatch"
+
+        x = x.view(B, N, C, H, W)
+        x = x.permute(0, 1, 3, 4, 2)   # (B, N, H, W, C)
+        x = x.reshape(B, N * H * W, C)
+
+        return x
+
+class SpatioTemporalPositionalEncoding(nn.Module):
+    def __init__(self, dim, max_tokens=256):
+        super().__init__()
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, max_tokens, dim)
+        )
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, x):
+        return x + self.pos_embed[:, :x.size(1)]
+
+class SpatioTemporalTransformer(nn.Module):
+    def __init__(
+        self,
+        dim=192,
+        depth=2,
+        heads=4,
+        dropout=0.1
+    ):
+        super().__init__()
+
+        self.pos_embed = SpatioTemporalPositionalEncoding(dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=heads,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True
+        )
+
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=depth
+        )
+
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        """
+        x: (B, tokens, D)
+        """
+        x = self.pos_embed(x)
+        x = self.encoder(x)
+        return self.norm(x)
+
+class X3D_SpatioTemporalTransformer(nn.Module):
+    def __init__(self, num_classes=51):
+        super().__init__()
+
+        self.backbone = X3DFeatureExtractor()
+        self.tokenizer = SpatioTemporalTokenizer()
+
+        self.embed_dim = 192
+
+        self.st_transformer = SpatioTemporalTransformer(
+            dim=self.embed_dim,
+            depth=2,
+            heads=4
+        )
+
+        self.fc = nn.Linear(self.embed_dim, num_classes)
+
+    def forward(self, x):
+        """
+        x: (B, N, C, T, H, W)
+        """
+        B, N, C, T, H, W = x.shape
+        x = x.view(B * N, C, T, H, W)
+
+        feat = self.backbone(x)  # (B*N, C, t', h', w')
+        feat = feat.mean(dim=2)
+        tokens = self.tokenizer(feat, B, N)  # (B, tokens, C)
+
+        tokens = self.st_transformer(tokens)
+
+        feat = tokens.mean(dim=1)  # global pooling
+
+        
+        return self.fc(feat)

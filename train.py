@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn 
 from torch.utils.data import DataLoader
 from src.config import ModelConfig, TrainingConfig
-from src.dataset import HMDB51Dataset, collate_fn
-from src.model import LSViTForAction
+from src.dataset import HMDB51Dataset, VideoDataset, TestTNSDataset, collate_fn, create_balanced_sampler
+from src.model import LSViTForAction, X3D_SpatioTemporalTransformer
 from src.utils import set_seed, load_vit_checkpoint, ensure_dir
 from src.engine import train_one_epoch, evaluate
 
@@ -68,20 +68,25 @@ def main():
 
     # Dataset & Dataloader
     print("Initializing datasets...")
+    
     train_ds = HMDB51Dataset(
         root=t_cfg.data_root, split='train', 
         num_frames=t_cfg.num_frames, frame_stride=t_cfg.frame_stride,
         val_ratio=t_cfg.val_ratio, seed=t_cfg.seed
     )
+    train_dataset = VideoDataset(root=t_cfg.data_root,num_segments=4,clip_len=16,is_train=True)
+    balanced_sampler = create_balanced_sampler(train_dataset)
     val_ds = HMDB51Dataset(
         root=t_cfg.data_root, split='val', 
         num_frames=t_cfg.num_frames, frame_stride=t_cfg.frame_stride,
         val_ratio=t_cfg.val_ratio, seed=t_cfg.seed
     )
-
+    val_dataset = TestTNSDataset(root=t_cfg.data_root,num_segments=4,clip_len=16)
     train_loader = DataLoader(
         train_ds, batch_size=t_cfg.batch_size, shuffle=True,
-        num_workers=t_cfg.num_workers, pin_memory=True, collate_fn=collate_fn
+        num_workers=t_cfg.num_workers, pin_memory=True, 
+        #collate_fn=collate_fn
+        sampler=balanced_sampler
     )
     val_loader = DataLoader(
         val_ds, batch_size=t_cfg.batch_size, shuffle=False,
@@ -92,8 +97,9 @@ def main():
 
     # Model Setup 
     print("Creating model...")
-    model = LSViTForAction(config=m_cfg)
-    
+    #model = LSViTForAction(config=m_cfg)
+    model = X3D_SpatioTemporalTransformer()
+
     # BƯỚC 1: Load weights VÀO RAM trước khi đẩy vào GPU
     load_vit_checkpoint(model.backbone, t_cfg.pretrained_name, t_cfg.weights_dir)
 
