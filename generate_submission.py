@@ -39,6 +39,9 @@ class DenseTestDataset(Dataset):
         self.num_frames = num_frames
         
         # Tìm tất cả folder video (0, 1, 2...)
+        if not self.root.exists():
+             raise FileNotFoundError(f"Không tìm thấy thư mục: {self.root}")
+
         self.video_folders = sorted([d for d in self.root.iterdir() if d.is_dir()])
         
         # Transform: Chỉ Resize và Normalize (Không crop, không flip để giữ nguyên gốc)
@@ -77,11 +80,12 @@ class DenseTestDataset(Dataset):
         
         if total_frames == 0:
             # Xử lý trường hợp folder rỗng (trả về tensor 0)
-            return torch.zeros(self.num_clips, 3, self.num_frames, 224, 224), video_id
+            # Lưu ý: Cần trả về đúng kích thước ảnh image_size đã cấu hình
+            dummy_size = self.transform.transforms[0].size[0] # Lấy size từ transform
+            return torch.zeros(self.num_clips, 3, self.num_frames, dummy_size, dummy_size), video_id
 
         # === LOGIC DENSE SAMPLING ===
         # Chọn 10 điểm bắt đầu rải đều từ đầu đến (cuối - độ dài clip)
-        # Ví dụ: Video 100 frames, clip 16 frame -> max start = 84
         max_start = max(0, total_frames - self.num_frames)
         start_indices = np.linspace(0, max_start, self.num_clips, dtype=int)
         
@@ -104,50 +108,73 @@ def save_submission(ids, predictions, output_path):
         df['id_num'] = df['id'].astype(int)
         df = df.sort_values(by='id_num').drop(columns=['id_num'])
     except:
+        print("Warning: Không thể convert ID sang số, sort theo string.")
         df = df.sort_values(by='id')
         
-    df.to_csv(output_path, index=False)
-    print(f"✅ Submission saved to: {output_path}")
+    # Check môi trường Kaggle
+    if os.path.exists('/kaggle/working'):
+        final_path = os.path.join('/kaggle/working', os.path.basename(output_path))
+    else:
+        final_path = output_path
+
+    df.to_csv(final_path, index=False)
+    print(f"✅ Submission saved to: {final_path}")
+    print(df.head())
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', type=str, required=True)
-    parser.add_argument('--data_root', type=str, required=True)
+    parser.add_argument('--checkpoint', type=str, required=True, help='Path to .pth file')
+    parser.add_argument('--data_root', type=str, required=True, help='Path to test folder')
+    
+    # Các tham số quan trọng đã được thêm vào
     parser.add_argument('--num_clips', type=int, default=10, help='Số lượng clip cắt ra từ 1 video')
-    parser.add_argument('--batch_size', type=int, default=4, help='Lưu ý: Batch size nhỏ vì 1 sample = 10 clips')
+    parser.add_argument('--num_frames', type=int, default=16, help='Số frame input của model (16 hoặc 32)')
+    parser.add_argument('--image_size', type=int, default=224, help='Kích thước ảnh (224, 256...)')
+    
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size (nên nhỏ vì nhân với num_clips)')
+    parser.add_argument('--num_workers', type=int, default=2)
     parser.add_argument('--output', type=str, default='submission.csv')
+    
     args = parser.parse_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     # 1. Load Model
-    print("Loading model...")
+    print(f"Loading model config: frames={args.num_frames}, size={args.image_size}...")
     config = ModelConfig()
     config.num_classes = 51
+    config.image_size = args.image_size # Cập nhật size
+    
     model = LSViTForAction(config=config).to(device)
     
+    print(f"Loading checkpoint from {args.checkpoint}...")
     checkpoint = torch.load(args.checkpoint, map_location=device)
     state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
     
     # Clean keys
     new_state_dict = {k.replace('module.', '').replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    
+    # Load weights (strict=False để tránh lỗi nhỏ nếu config lệch nhẹ)
     model.load_state_dict(new_state_dict, strict=False)
     model.eval()
 
     # 2. Dataset & Loader
-    print(f"Loading data from {args.data_root} with Dense Sampling ({args.num_clips} clips/video)...")
+    print(f"Loading data from {args.data_root}...")
+    print(f"Strategy: Dense Sampling ({args.num_clips} clips x {args.num_frames} frames)")
+    
     dataset = DenseTestDataset(
         root=args.data_root, 
         num_clips=args.num_clips,
-        num_frames=16 # Mặc định theo config train
+        num_frames=args.num_frames, # Lấy từ args
+        image_size=args.image_size  # Lấy từ args
     )
     
     loader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=False, 
-        num_workers=2
+        num_workers=args.num_workers
     )
 
     # 3. Inference Loop
@@ -158,24 +185,22 @@ def main():
     with torch.no_grad():
         for videos, ids in tqdm(loader):
             # videos shape: [Batch_Size, Num_Clips, 3, T, H, W]
-            # Ví dụ: [4, 10, 3, 16, 224, 224]
             
             b, n_clips, c, t, h, w = videos.shape
             
-            # Gộp Batch và Num_Clips lại để đưa vào model (Model chỉ nhận 4D batch)
-            # Input thành: [40, 3, 16, 224, 224]
+            # Gộp Batch và Num_Clips lại
+            # Input thành: [Batch_Size * Num_Clips, 3, T, H, W]
             inputs = videos.view(-1, c, t, h, w).to(device)
             
             # Forward
-            logits = model(inputs) # Kết quả: [40, 51]
+            logits = model(inputs) # Kết quả: [Batch*Clips, 51]
             
             # Tách lại Batch và Clips
-            # [4, 10, 51]
+            # [Batch_Size, Num_Clips, 51]
             logits = logits.view(b, n_clips, -1)
             
             # === CHÌA KHÓA: LẤY TRUNG BÌNH CỘNG (MEAN) ===
-            # Trung bình cộng điểm số của 10 clips
-            mean_logits = logits.mean(dim=1) # [4, 51]
+            mean_logits = logits.mean(dim=1) # [Batch_Size, 51]
             
             # Lấy nhãn max
             preds = mean_logits.argmax(dim=1).cpu().numpy()
