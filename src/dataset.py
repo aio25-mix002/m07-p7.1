@@ -83,6 +83,7 @@ class VideoTransform:
 
         return frames
 
+
 class HMDB51Dataset(Dataset):
     def __init__(self, root: str, split: str, num_frames: int, frame_stride: int, 
                  image_size: int = 224, val_ratio: float = 0.1, seed: int = 42):
@@ -94,28 +95,35 @@ class HMDB51Dataset(Dataset):
         self.classes = sorted([d.name for d in self.root.iterdir() if d.is_dir()])
         self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
         
-        # --- (Giữ nguyên logic load path và split train/val của bạn) ---
+        # Load danh sách video và gom nhóm
         grouped_samples = {}
         for cls in self.classes:
             cls_dir = self.root / cls
             for video_dir in sorted([d for d in cls_dir.iterdir() if d.is_dir()]):
                 frame_paths = sorted([p for p in video_dir.iterdir() if p.suffix.lower() in {".jpg", ".png"}])
                 if not frame_paths: continue
+                
                 base_name = self._base_video_name(video_dir.name)
                 group_key = (cls, base_name)
                 grouped_samples.setdefault(group_key, []).append((frame_paths, self.class_to_idx[cls]))
 
+        # === CHỈNH SỬA QUAN TRỌNG: FULL DATASET ===
         group_values = list(grouped_samples.values())
+        
+        # Vẫn shuffle để khi train model không học theo thứ tự class
         rng = np.random.RandomState(seed)
         group_indices = np.arange(len(group_values))
         rng.shuffle(group_indices)
         
-        split_point = int(len(group_indices) * (1 - val_ratio))
+        # BỎ QUA LOGIC CHIA val_ratio
+        # Dù là 'train' hay 'val' (nếu lỡ gọi), ta đều lấy 100% dữ liệu
+        selected_groups = group_indices
+        
         if split == "train":
-            selected_groups = group_indices[:split_point]
+            print(f"--> Mode TRAIN: Sử dụng TOÀN BỘ {len(selected_groups)} videos.")
         else:
-            selected_groups = group_indices[split_point:]
-            
+            print(f"--> Mode VAL (Sanity Check): Sử dụng TOÀN BỘ {len(selected_groups)} videos.")
+
         self.samples = []
         for idx in selected_groups:
             self.samples.extend(group_values[int(idx)])
@@ -124,52 +132,44 @@ class HMDB51Dataset(Dataset):
         self.num_frames = num_frames
         self.frame_stride = max(1, frame_stride)
         
-        # === PHẦN CHỈNH SỬA QUAN TRỌNG NHẤT (AUGMENTATION COOLDOWN) ===
-        # Thay vì dùng VideoTransform phức tạp, ta dùng torchvision thuần.
-        # Mục tiêu: Đưa dữ liệu về dạng "sạch" nhất (Resize + Normalize) để Fine-tune.
-        
         self.to_tensor = transforms.ToTensor()
         
-        # Cấu hình Normalize chuẩn ImageNet
+        # Transform (Dùng cấu hình nhẹ nhàng cho Final Training)
         norm_mean = [0.485, 0.456, 0.406]
         norm_std = [0.229, 0.224, 0.225]
 
         if split == "train":
-            # Giai đoạn Cooldown: Bỏ RandomCrop, Bỏ RandomRotation.
-            # Chỉ Resize về đúng kích thước và Normalize.
+            # Train: Resize + Normalize (Có thể thêm Augment nhẹ nếu muốn, nhưng ở đây giữ sạch để fine-tune)
             self.transform = transforms.Compose([
                 transforms.Resize((image_size, image_size)), 
                 transforms.Normalize(mean=norm_mean, std=norm_std)
             ])
         else:
-            # Validation: Giữ nguyên như cũ (Resize + Normalize)
             self.transform = transforms.Compose([
                 transforms.Resize((image_size, image_size)),
                 transforms.Normalize(mean=norm_mean, std=norm_std)
             ])
-            
-        # Lưu ý: Tại sao không dùng RandomHorizontalFlip ở đây? 
-        # Vì nếu áp dụng từng frame, video sẽ bị nhấp nháy (frame lật, frame không).
-        # Tốt nhất giai đoạn cuối nên bỏ qua để dữ liệu ổn định.
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def _select_indices(self, total_frames: int) -> torch.Tensor:
-        # --- (Giữ nguyên logic Sampling của bạn) ---
         if total_frames <= 0:
             return torch.zeros(self.num_frames, dtype=torch.long)
+
         if total_frames < self.num_frames:
             idxs = torch.arange(total_frames)
             pad = idxs.new_full((self.num_frames - total_frames,), idxs[-1].item())
             return torch.cat([idxs, pad], dim=0)
-        
+
         segments = np.linspace(0, total_frames, self.num_frames + 1)
         indices = []
         for i in range(self.num_frames):
             start, end = int(segments[i]), int(segments[i+1])
             if start == end: end = start + 1
+            
             if self.split == 'train':
+                # Random sampling nhẹ
                 idx = np.random.randint(start, end)
             else:
                 idx = (start + end) // 2
@@ -179,7 +179,7 @@ class HMDB51Dataset(Dataset):
 
     @staticmethod
     def _base_video_name(name: str) -> str:
-        match = re.match(r"(.+)_\d+$", name)
+        match = re.match(r"(.+)_\\d+$", name)
         return match.group(1) if match else name
 
     def __getitem__(self, idx: int):
@@ -192,24 +192,12 @@ class HMDB51Dataset(Dataset):
             path = frame_paths[int(i.item())]
             with Image.open(path) as img:
                 img = img.convert("RGB")
-                
-                # 1. Chuyển sang Tensor [C, H, W]
                 tensor_img = self.to_tensor(img)
-                
-                # 2. Áp dụng Transform ngay trên từng frame
-                # (Để tránh lỗi dimension khi stack thành video)
                 transformed_img = self.transform(tensor_img)
-                
                 frames.append(transformed_img)
         
-        # 3. Stack lại thành video [T, C, H, W]
-        video = torch.stack(frames) 
-        
-        # Lưu ý: Không gọi self.transform(video) ở đây nữa vì đã làm trong vòng lặp rồi
-        
+        video = torch.stack(frames)
         return video, label
-
-
 class TestDataset(Dataset):
     """Dataset for test data without labels (Kaggle competition format)."""
 
