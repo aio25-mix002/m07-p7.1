@@ -141,7 +141,13 @@ def main():
         
     model = model.to(device)
     
-    # Optimizer & Scheduler (Giữ nguyên)
+   
+    if torch.cuda.device_count() > 1 and device.type == 'cuda':
+        print(f"Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
+        model = nn.DataParallel(model)
+    # ======================================
+    
+    # Optimizer & Scheduler (Tiếp tục code cũ)
     params = build_optimizer_params(model, base_lr=t_cfg.lr, weight_decay=0.05)
     optimizer = torch.optim.AdamW(params, lr=t_cfg.lr)
     
