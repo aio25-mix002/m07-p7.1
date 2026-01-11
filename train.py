@@ -87,6 +87,13 @@ def build_optimizer_params(model, base_lr, weight_decay, layer_decay=0.75):
 
 def main():
     args = parse_args()
+    
+    # === KIỂM TRA GPU ===
+    print(f"--> Kiểm tra phần cứng...")
+    gpu_count = torch.cuda.device_count()
+    print(f"Số lượng GPU tìm thấy: {gpu_count}")
+    for i in range(gpu_count):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
 
     # Config
     t_cfg = TrainingConfig()
@@ -94,13 +101,24 @@ def main():
 
     # Override config with command line arguments
     if args.epochs is not None: t_cfg.epochs = args.epochs
-    if args.batch_size is not None: t_cfg.batch_size = args.batch_size
+    
+    # TỰ ĐỘNG CẬP NHẬT BATCH SIZE DỰA TRÊN SỐ GPU
+    if args.batch_size is not None: 
+        t_cfg.batch_size = args.batch_size
+    elif gpu_count > 1:
+        # Nếu người dùng không set batch_size, tự động nhân đôi nếu có 2 GPU
+        print(f"Tự động tăng Batch Size từ {t_cfg.batch_size} -> {t_cfg.batch_size * gpu_count} (do dùng {gpu_count} GPU)")
+        t_cfg.batch_size = t_cfg.batch_size * gpu_count
+
     if args.lr is not None: t_cfg.lr = args.lr
     if args.data_root is not None: t_cfg.data_root = args.data_root
     if args.num_frames is not None: t_cfg.num_frames = args.num_frames
     if args.frame_stride is not None: t_cfg.frame_stride = args.frame_stride
     if args.num_workers is not None: t_cfg.num_workers = args.num_workers
+    
+    # Force Val ratio = 0 (Full Data Mode)
     t_cfg.val_ratio = 0.0
+    
     if args.seed is not None: t_cfg.seed = args.seed
 
     set_seed(t_cfg.seed)
@@ -108,12 +126,12 @@ def main():
     print(f"Using device: {device}")
 
     # Dataset
-    print("Initializing FULL datasets...")
+    print("Initializing FULL datasets (Train = All Data)...")
     train_ds = HMDB51Dataset(root=t_cfg.data_root, split='train', 
                              num_frames=t_cfg.num_frames, frame_stride=t_cfg.frame_stride,
                              val_ratio=0.0, seed=t_cfg.seed)
     
-    # Không cần val_ds thực sự, nhưng tạo để code không lỗi nếu có đoạn nào gọi len()
+    # DataLoader
     loader_kwargs = {
         "batch_size": t_cfg.batch_size,
         "num_workers": t_cfg.num_workers,
@@ -122,14 +140,13 @@ def main():
     }
     
     train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, collate_fn=collate_fn, **loader_kwargs)
-    
     print(f"FULL Train size: {len(train_ds)}")
 
-    # Model Setup (Giữ nguyên)
+    # Model Setup 
     print("Creating model...")
     model = LSViTForAction(config=m_cfg)
     
-    # Load checkpoint logic (Giữ nguyên logic Resume của bạn)
+    # Load checkpoint logic
     if args.resume:
         print(f"--> RESUMING TRAINING from: {args.resume}")
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -141,16 +158,17 @@ def main():
         
     model = model.to(device)
     
-   
-    if torch.cuda.device_count() > 1 and device.type == 'cuda':
-        print(f"Kích hoạt chế độ Multi-GPU trên {torch.cuda.device_count()} card!")
+    # === KÍCH HOẠT MULTI-GPU ===
+    if gpu_count > 1 and device.type == 'cuda':
+        print(f"Kích hoạt chế độ DataParallel trên {gpu_count} GPUs!")
         model = nn.DataParallel(model)
-    # ======================================
+    # ===========================
     
-    # Optimizer & Scheduler (Tiếp tục code cũ)
+    # Optimizer
     params = build_optimizer_params(model, base_lr=t_cfg.lr, weight_decay=0.05)
     optimizer = torch.optim.AdamW(params, lr=t_cfg.lr)
     
+    # Scheduler
     if args.resume:
         scheduler = CosineAnnealingLR(optimizer, T_max=t_cfg.epochs, eta_min=1e-7)
     else:
@@ -158,27 +176,53 @@ def main():
         main_scheduler = CosineAnnealingLR(optimizer, T_max=t_cfg.epochs - 5, eta_min=1e-6)
         scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[5])
 
-    # Loss (Giữ nguyên)
-    # Tắt Mixup nếu muốn train sạch ở bước cuối
-    mixup_fn = None 
-    train_criterion = nn.CrossEntropyLoss()
+    # === MIXUP SETUP (GIỮ NGUYÊN) ===
+    mixup_fn = None
+    cutmix_minmax = getattr(t_cfg, 'cutmix_minmax', None)
+    
+    # Kiểm tra config có bật mixup không
+    mixup_active = t_cfg.mixup_alpha > 0 or t_cfg.cutmix_alpha > 0 or cutmix_minmax is not None
+    if mixup_active:
+        print(f"Data Augmentation: Enabled Mixup (alpha={t_cfg.mixup_alpha}) & CutMix!")
+        mixup_fn = Mixup(
+            mixup_alpha=t_cfg.mixup_alpha, 
+            cutmix_alpha=t_cfg.cutmix_alpha, 
+            prob=t_cfg.mixup_prob, 
+            switch_prob=t_cfg.mixup_switch_prob, 
+            mode=t_cfg.mixup_mode,
+            label_smoothing=t_cfg.label_smoothing, 
+            num_classes=m_cfg.num_classes
+        )
+        
+    # Loss Function
+    if mixup_fn is not None:
+        print("  -> Using SoftTargetCrossEntropy (Mixup/Cutmix enabled)")
+        train_criterion = SoftTargetCrossEntropy()
+    else:
+        if t_cfg.label_smoothing > 0:
+            print(f"  -> Using CrossEntropyLoss with Label Smoothing: epsilon={t_cfg.label_smoothing}")
+            train_criterion = nn.CrossEntropyLoss(label_smoothing=t_cfg.label_smoothing)
+        else:
+            print("  -> Using Standard CrossEntropyLoss")
+            train_criterion = nn.CrossEntropyLoss()
+            
     scaler = torch.amp.GradScaler('cuda') if torch.cuda.is_available() else None
     
     ensure_dir(args.checkpoint_dir)
     
-    # === VÒNG LẶP TRAIN TOÀN BỘ (FULL DATA LOOP) ===
+    # === TRAINING LOOP (FULL DATA) ===
     print(f"\nStart Training ALL DATA for {t_cfg.epochs} epochs...")
     
     for epoch in range(t_cfg.epochs):
         
-        # Luôn Unfreeze khi train full (hoặc tùy logic của bạn)
+        # Unfreeze
         real_model = model.module if hasattr(model, 'module') else model
         for param in real_model.backbone.parameters():
             param.requires_grad = True
             
         print(f"\nEpoch {epoch+1}/{t_cfg.epochs}")
         
-        # 1. Train
+        # Train
         train_loss, train_acc = train_one_epoch(
             model, train_loader, optimizer, scaler, device, 
             mixup_fn=mixup_fn, criterion=train_criterion
@@ -189,10 +233,7 @@ def main():
         
         print(f"Train Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | LR: {current_lr:.6f}")
         
-        # 2. KHÔNG CHẠY EVALUATE (Tiết kiệm thời gian)
-        # Vì Val set = Train set, chạy evaluate là vô nghĩa.
-        
-        # 3. LƯU MODEL (Luôn lưu model cuối cùng)
+        # Save last model
         model_to_save = model.module if hasattr(model, 'module') else model
         last_path = f"{args.checkpoint_dir}/last_model_full.pth"
         torch.save(model_to_save.state_dict(), last_path)
