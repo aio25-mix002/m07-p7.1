@@ -56,6 +56,9 @@ class DenseTestDataset(Dataset):
             with Image.open(path) as img:
                 img = img.convert("RGB")
                 frames.append(self.transform(img))
+        
+        # Stack lại: [Num_Frames, Channels, H, W]
+        # Ví dụ: [16, 3, 224, 224]
         return torch.stack(frames) 
 
     def __getitem__(self, idx):
@@ -67,8 +70,7 @@ class DenseTestDataset(Dataset):
         
         if total_frames == 0:
             dummy_size = self.transform.transforms[0].size[0]
-            # Trả về tensor rỗng đúng kích thước num_frames
-            return torch.zeros(self.num_clips, 3, self.num_frames, dummy_size, dummy_size), video_id
+            return torch.zeros(self.num_clips, self.num_frames, 3, dummy_size, dummy_size), video_id
 
         max_start = max(0, total_frames - self.num_frames)
         start_indices = np.linspace(0, max_start, self.num_clips, dtype=int)
@@ -76,10 +78,13 @@ class DenseTestDataset(Dataset):
         clips = []
         for start_idx in start_indices:
             clip = self._load_clip(frame_paths, start_idx) 
-            # Permute: [T, 3, H, W] -> [3, T, H, W]
-            clip = clip.permute(1, 0, 2, 3) 
+            # === SỬA LỖI Ở ĐÂY ===
+            # KHÔNG dùng permute(1,0,2,3) nữa. 
+            # Giữ nguyên thứ tự [T, C, H, W] (Frames, Channels, H, W)
+            # Vì Model của bạn mong đợi [B, T, C, H, W]
             clips.append(clip)
             
+        # Output: [Num_Clips, T, C, H, W]
         return torch.stack(clips), video_id
 
 def save_submission(ids, predictions, output_path):
@@ -103,8 +108,6 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--num_clips', type=int, default=10)
-    
-    # ÉP BUỘC default=16 để tránh lỗi, nếu bạn muốn 32 thì phải gõ --num_frames 32
     parser.add_argument('--num_frames', type=int, default=16) 
     parser.add_argument('--image_size', type=int, default=224)
     parser.add_argument('--batch_size', type=int, default=4)
@@ -115,13 +118,11 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # 1. Load Config & Model
+    # 1. Load Model
     print(f"Configuring Model: Frames={args.num_frames}, Size={args.image_size}")
     config = ModelConfig()
     config.num_classes = 51
     config.image_size = args.image_size
-    
-    # QUAN TRỌNG: Cập nhật num_frames vào config nếu ModelConfig hỗ trợ
     if hasattr(config, 'num_frames'):
         config.num_frames = args.num_frames
     
@@ -132,42 +133,34 @@ def main():
     state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
     new_state_dict = {k.replace('module.', '').replace('_orig_mod.', ''): v for k, v in state_dict.items()}
     
-    # Load weights
-    try:
-        model.load_state_dict(new_state_dict, strict=True)
-    except Exception as e:
-        print(f"Warning: Strict load failed ({str(e)[:50]}...), using strict=False")
-        model.load_state_dict(new_state_dict, strict=False)
-        
+    model.load_state_dict(new_state_dict, strict=False)
     model.eval()
 
     # 2. Load Data
-    print(f"Loading Dataset: Root={args.data_root}")
+    print(f"Loading Dataset from {args.data_root}")
     dataset = DenseTestDataset(
         root=args.data_root, 
         num_clips=args.num_clips,
-        num_frames=args.num_frames, # Đảm bảo truyền đúng arg này
+        num_frames=args.num_frames, 
         image_size=args.image_size
     )
     
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
-    # 3. Inference
     all_preds = []
     all_ids = []
 
     print("Running Inference...")
     with torch.no_grad():
         for i, (videos, ids) in enumerate(tqdm(loader)):
-            # DEBUG: In ra shape của batch đầu tiên để kiểm tra lỗi
-            if i == 0:
-                print(f"\n[DEBUG] Input Tensor Shape: {videos.shape}")
-                # Expected: [Batch, Clips, 3, Frames, H, W] -> Ví dụ [4, 10, 3, 16, 224, 224]
-                if videos.shape[3] != args.num_frames:
-                    print(f"⚠️ CẢNH BÁO: Số frame thực tế ({videos.shape[3]}) khác số frame config ({args.num_frames})!")
-
-            b, n_clips, c, t, h, w = videos.shape
-            inputs = videos.view(-1, c, t, h, w).to(device)
+            # videos shape: [Batch, Num_Clips, T, C, H, W]
+            # Ví dụ: [4, 10, 16, 3, 224, 224]
+            
+            b, n_clips, t, c, h, w = videos.shape
+            
+            # Gộp Batch và Num_Clips
+            # Input thành: [Batch*Clips, T, C, H, W]
+            inputs = videos.view(-1, t, c, h, w).to(device)
             
             # Forward
             logits = model(inputs) 
